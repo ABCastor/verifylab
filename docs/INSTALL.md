@@ -33,7 +33,7 @@ or ineffective jail stops a check; it never downgrades to unsandboxed execution.
 Protected Lean checks follow the [pinned Comparator isolation requirement](https://github.com/leanprover/comparator/blob/19e111e2141cf333c7daff0f64c5f24acc91dd2e/README.md):
 an outer systemd user service denies AF_UNIX sockets before bubblewrap starts. A trusted helper tests actual
 `EAFNOSUPPORT` before each jailed command; missing launchers, manager or enforcement stop the protected check
-as `unsupported`. A resource scope alone cannot enforce this property. A kernel version number does not
+with `error` or `unsupported`, never a passing verdict. A resource scope alone cannot enforce this property. A kernel version number does not
 replace the enforcement test.
 
 The manager also supplies per-run memory/task limits and the aggregate `vl.slice` memory limit. Python,

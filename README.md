@@ -37,7 +37,7 @@ whether the target actually represents the intended problem.
 - bubblewrap (`bwrap`): every check, protected or exploratory, and every `vl lane exec` runs in its jail.
 - A working systemd user manager is required for protected Lean checks: an outer service enforces
   Comparator's `RestrictAddressFamilies=~AF_UNIX`, with actual socket denial tested before each jailed command.
-  Without enforcement, the check stops as `unsupported`. For Python, exploratory checks and lane execution,
+  Without enforcement, the check stops with `error` or `unsupported`, never `pass`. For Python, exploratory checks and lane execution,
   systemd supplies optional memory/task caps; without it those runs are uncapped, with a warning recorded.
 - For Lean: a toolchain installed with elan, and [Comparator](https://github.com/leanprover/comparator),
   lean4export and landrun (Landlock, Linux ≥ 5.13), and nanoda, the second kernel: protected checks need it

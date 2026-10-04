@@ -158,7 +158,7 @@ case coverage with every case passed and no failure/judge error, interpreter/ver
 Protected Lean execution additionally requires the pinned Comparator's outer AF_UNIX restriction: a systemd
 service applies `RestrictAddressFamilies=~AF_UNIX`, and a trusted helper observes socket denial before every
 jailed command. Receipts record the executed service command and isolation. Missing enforcement is
-`unsupported`; Python/exploratory resource caps retain their independent optional fallback.
+an inconclusive `error` or `unsupported`, never `pass`; Python/exploratory resource caps retain their independent optional fallback.
 Incomplete historical passes remain files but fail validation and cannot verify a result; error, fail,
 unsupported and exploratory receipts can describe partial execution. These consistency checks do not
 authenticate execution: a trusted integrator can still admit a well-formed fabricated receipt.
