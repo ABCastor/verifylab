@@ -21,6 +21,24 @@ def result_lines(out: str) -> list[str]:
     return [line for line in out.splitlines() if line.startswith("  ")]
 
 
+def write_reference_only_source(root):
+    path = root / "research" / "items" / "reference-only.md"
+    path.write_text(
+        '''+++
+id = "reference-only"
+kind = "source"
+title = "A bibliographic source"
+author = "agent:test"
+created = "2026-10-01"
+ref = "DOI:10.5555/verifylab.2026.001; arXiv:2601.12345"
+access = "citation-only"
++++
+Metadata-only source.
+'''
+    )
+    return path
+
+
 def test_index_rebuilds_after_cache_deletion_without_loss(research_repo, monkeypatch, capsys):
     root = research_repo
     monkeypatch.chdir(root)
@@ -75,6 +93,7 @@ def test_index_goes_stale_when_items_or_lean_files_change(research_repo, monkeyp
 def test_like_fallback_matches_fts(research_repo, monkeypatch):
     root = research_repo
     write_item(root, "other-result")
+    write_reference_only_source(root)
     repo = Repo.open(root)
     if not index.fts5_available():
         pytest.skip("SQLite without FTS5: only the LIKE path exists here")
@@ -82,12 +101,38 @@ def test_like_fallback_matches_fts(research_repo, monkeypatch):
     like = index.open_index(repo, fts=False)
     try:
         assert fts.info.fts and not like.info.fts and like.info.rebuilt
-        for query in ("natural", "small result", "add-zero", "every n"):
+        for query in ("natural", "small result", "add-zero", "every n",
+                      "10.5555/verifylab.2026.001", "arXiv:2601.12345"):
             assert set(fts.search_items(query)) == set(like.search_items(query)), query
         assert like.search_items("nothing-like-this") == []
+        assert fts.search_items("10.5555/verifylab.2026.001") == ["reference-only"]
+        assert like.search_items("10.5555/verifylab.2026.001") == ["reference-only"]
+        assert fts.search_items("arXiv:2601.12345") == ["reference-only"]
+        assert like.search_items("arXiv:2601.12345") == ["reference-only"]
     finally:
         fts.close()
         like.close()
+
+
+def test_old_index_schema_is_rebuilt_to_include_references(research_repo):
+    import sqlite3
+
+    root = research_repo
+    write_reference_only_source(root)
+    repo = Repo.open(root)
+    first = index.open_index(repo, fts=False)
+    first.close()
+    db = root / ".vl-cache" / "index.sqlite"
+    with sqlite3.connect(db) as con:
+        con.execute("UPDATE meta SET value = ? WHERE key = 'schema'", (str(index.SCHEMA_VERSION - 1),))
+
+    rebuilt = index.open_index(repo, fts=False)
+    try:
+        assert rebuilt.info.rebuilt and rebuilt.info.reason == "schema"
+        assert rebuilt.search_items("10.5555/verifylab.2026.001") == ["reference-only"]
+        assert rebuilt.search_items("arXiv:2601.12345") == ["reference-only"]
+    finally:
+        rebuilt.close()
 
 
 def test_scan_lean_tracks_namespaces_and_skips_comments():

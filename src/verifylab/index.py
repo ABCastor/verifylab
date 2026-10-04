@@ -20,7 +20,7 @@ from . import leanmod
 from .records import RecordError, parse_item
 from .repo import CACHE_DIR, Repo
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 DB_NAME = "index.sqlite"
 SKIP_DIRS = {".lake", "lake-packages", ".git", "build", "node_modules", "__pycache__"}
 
@@ -187,12 +187,12 @@ def _fill(repo: Repo, tmp: Path, sig: str, fts: bool) -> None:
         con.executescript("""
             CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE items (id TEXT PRIMARY KEY, kind TEXT, title TEXT, path TEXT, revision TEXT,
-                                statement TEXT, limits TEXT, assumptions TEXT, body TEXT, haystack TEXT);
+                                statement TEXT, limits TEXT, assumptions TEXT, body TEXT, ref TEXT, haystack TEXT);
             CREATE TABLE decls (name TEXT, kind TEXT, path TEXT, line INTEGER, source TEXT,
                                 name_lower TEXT, source_lower TEXT);
         """)
         if fts:
-            con.execute("CREATE VIRTUAL TABLE items_fts USING fts5(id, title, statement, limits, assumptions, body)")
+            con.execute("CREATE VIRTUAL TABLE items_fts USING fts5(id, title, statement, limits, assumptions, body, ref)")
         unparsed = 0
         for file in repo.item_files():
             rel = _rel(repo, file)
@@ -203,11 +203,12 @@ def _fill(repo: Repo, tmp: Path, sig: str, fts: bool) -> None:
                 continue
             row = (item.id, item.title, item.statement or "", "\n".join(item.limits),
                    "\n".join(item.assumptions), item.body)
-            haystack = "\n".join(row).casefold()
-            con.execute("INSERT OR IGNORE INTO items VALUES (?,?,?,?,?,?,?,?,?,?)",
-                        (item.id, item.kind, item.title, rel, item.revision, *row[2:], haystack))
+            ref = item.ref or ""
+            haystack = "\n".join((*row, ref)).casefold()
+            con.execute("INSERT OR IGNORE INTO items VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                        (item.id, item.kind, item.title, rel, item.revision, *row[2:], ref, haystack))
             if fts:
-                con.execute("INSERT INTO items_fts VALUES (?,?,?,?,?,?)", row)
+                con.execute("INSERT INTO items_fts VALUES (?,?,?,?,?,?,?)", (*row, ref))
         files = lean_files(repo)
         for file in files:
             rel = _rel(repo, file)
@@ -247,17 +248,17 @@ class Index:
             query = " AND ".join(f'"{w}"*' for w in words)
             rows = self.con.execute(
                 "SELECT f.id FROM items_fts f JOIN items i ON i.id = f.id WHERE items_fts MATCH ? "
-                "AND (? IS NULL OR i.kind = ?) ORDER BY bm25(items_fts, 8.0, 5.0, 2.0, 1.0, 1.0, 0.5), f.id",
+                "AND (? IS NULL OR i.kind = ?) ORDER BY bm25(items_fts, 8.0, 5.0, 2.0, 1.0, 1.0, 0.5, 2.0), f.id",
                 (query, kind, kind)).fetchall()
             return [r[0] for r in rows]
         tokens = text.casefold().split() or [text.casefold()]
         where = " AND ".join("haystack LIKE ? ESCAPE '\\'" for _ in tokens)
         rows = self.con.execute(
-            f"SELECT id, title FROM items WHERE {where} AND (? IS NULL OR kind = ?)",
+            f"SELECT id, title, ref FROM items WHERE {where} AND (? IS NULL OR kind = ?)",
             (*[_like(t) for t in tokens], kind, kind)).fetchall()
 
-        def rank(row: tuple[str, str]) -> tuple[int, str]:
-            head = f"{row[0]} {row[1]}".casefold()
+        def rank(row: tuple[str, str, str]) -> tuple[int, str]:
+            head = f"{row[0]} {row[1]} {row[2]}".casefold()
             return (-sum(t in head for t in tokens), row[0])
 
         return [r[0] for r in sorted(rows, key=rank)]
