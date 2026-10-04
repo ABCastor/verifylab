@@ -161,7 +161,7 @@ Exit 2 is always a usage or setup problem, never a verdict.
 |---|---|
 | `vl init` | create `research/` and `research/vl.toml`, write `git config vl.trustedRef`; `--tools` sets up the machine |
 | `vl show ID[@rev]` | the result card: corrections, limits, statement, status, proof, meaning, evidence, reviews, relations; `--impact`; `--brief` targets `--budget N` characters (default 8,000), naming a source's file, never inlining it; mandatory headers can exceed the budget, with a warning |
-| `vl find TEXT` | search items and the project's Lean declarations, local only; exit 1 when nothing matches |
+| `vl find TEXT` | search items and the project's Lean declarations, local only; source hits show their reference and access level; exit 1 when nothing matches |
 | `vl check ID` | run the item's checker and write a receipt; exit 0 pass, 1 fail, 3 error or unsupported; `--explore` never counts |
 | `vl review ID[@rev] --kind K` | record an immutable review: fidelity, compare, correction, retraction, understanding; new fidelity writes require `--expected-meaning-digest`; `--author human:NAME` only with `--human-approved` or a confirmation at the terminal |
 | `vl validate` | check records, references, receipts, reviews and targets, and warn on process state written into a record's prose and on target hypotheses its `assumptions` leave out; exit 1 on errors; `--incoming BRANCH` before a merge |

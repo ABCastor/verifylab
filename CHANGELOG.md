@@ -10,7 +10,7 @@
 - New fidelity writes require `--expected-meaning-digest`; `show --json` exposes the pinned meaning basis and digest.
   Lean reviews bind the stable toolchain, dependency manifest and relevant Lake configuration. Older Lean reviews
   without that environment require renewal; cache placement alone does not invalidate them.
-- Source `ref` identifiers are searchable without duplicating them in prose; older derived indexes rebuild.
+- Source `ref` identifiers are searchable and shown with their access level; older derived indexes rebuild.
 - Document the integrator trust assumption, asserted relations and finite probe limits. Skills support scoped
   blind read-back, provisional notebooks and appropriate empirical methods without per-edit review ceremony.
 

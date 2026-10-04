@@ -61,7 +61,8 @@ def run(args) -> int:
         if item is None:  # the index is a cache; a record that no longer parses is not shown
             continue
         items.append({"id": item.id, "kind": item.kind, "claim": item.claim, "title": item.title,
-                      "status": ctx.label(item.id), "revision": item.revision})
+                      "status": ctx.label(item.id), "revision": item.revision,
+                      "ref": item.ref, "access": item.access})
     shown = items[:args.limit]
     decl_rows = [{"name": n, "kind": k, "path": p, "line": ln} for n, k, p, ln in decls]
 
@@ -70,7 +71,8 @@ def run(args) -> int:
         lines.append(f"items ({len(shown)} of {len(items)}):")
         for i in shown:
             kind = i["kind"] + (f"/{i['claim']}" if i["claim"] else "")
-            lines.append(f"  {i['id']}@{i['revision'][:12]}  [{kind}; status: {i['status']}]  {i['title']}")
+            source = f"  [ref: {i['ref']}; access: {i['access']}]" if i["kind"] == "source" else ""
+            lines.append(f"  {i['id']}@{i['revision'][:12]}  [{kind}; status: {i['status']}]  {i['title']}{source}")
         if len(items) > len(shown):
             lines.append(f"  [MORE: {len(items) - len(shown)} more items match; raise --limit to see them]")
     if args.kind in (None, DECL_KIND):

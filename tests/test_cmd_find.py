@@ -29,6 +29,24 @@ def vl(capsys, *args):
     return rc, captured.out, captured.err
 
 
+def write_reference_only_source(root):
+    path = root / "research" / "items" / "reference-only.md"
+    path.write_text(
+        '''+++
+id = "reference-only"
+kind = "source"
+title = "A bibliographic source"
+author = "agent:test"
+created = "2026-10-01"
+ref = "DOI:10.5555/verifylab.2026.001; arXiv:2601.12345"
+access = "citation-only"
++++
+Metadata-only source.
+'''
+    )
+    return path
+
+
 def test_find_items_by_statement_and_limits(research_repo, monkeypatch, capsys):
     monkeypatch.chdir(research_repo)
     rc, out, _ = vl(capsys, "find", "natural numbers")
@@ -37,6 +55,30 @@ def test_find_items_by_statement_and_limits(research_repo, monkeypatch, capsys):
     rc, out, _ = vl(capsys, "find", "every", "--json")
     data = json.loads(out)
     assert [i["id"] for i in data["items"]] == ["add-zero"] and data["items"][0]["status"] == "unverified"
+
+
+def test_find_source_hits_show_reference_and_access(research_repo, monkeypatch, capsys):
+    root = research_repo
+    write_reference_only_source(root)
+    monkeypatch.chdir(root)
+
+    for identifier in ("10.5555/verifylab.2026.001", "arXiv:2601.12345"):
+        rc, out, _ = vl(capsys, "find", identifier)
+        assert rc == 0
+        assert "[ref: DOI:10.5555/verifylab.2026.001; arXiv:2601.12345; access: citation-only]" in out
+
+        rc, out, _ = vl(capsys, "find", identifier, "--json")
+        data = json.loads(out)
+        assert rc == 0
+        assert data["items"][0]["ref"] == "DOI:10.5555/verifylab.2026.001; arXiv:2601.12345"
+        assert data["items"][0]["access"] == "citation-only"
+
+    rc, out, _ = vl(capsys, "find", "natural", "--json")
+    data = json.loads(out)
+    assert rc == 0 and data["items"][0]["kind"] == "result"
+    assert data["items"][0]["ref"] is None and data["items"][0]["access"] is None
+    rc, out, _ = vl(capsys, "find", "natural")
+    assert rc == 0 and "[ref:" not in out and "access:" not in out
 
 
 def test_find_lean_declarations_with_namespaces(research_repo, monkeypatch, capsys):
