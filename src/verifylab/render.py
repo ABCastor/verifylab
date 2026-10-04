@@ -17,7 +17,7 @@ from typing import Any
 
 from .records import Item
 from .repo import Repo, StoredRecord
-from .status import UNDETERMINED, Status, derive, fidelity, receipt_order, review_order
+from .status import UNDETERMINED, Status, derive, fidelity, receipt_order, review_order, meaning, meaning_digest
 
 LINK_RE = re.compile(r"\[\[([a-z0-9][a-z0-9-]{1,63})(?:@([0-9a-fA-F]{4,40}))?\]\]")
 RELATIONS = (
@@ -288,7 +288,10 @@ def card_data(ctx: Context, item: Item, note: str | None = None) -> dict[str, An
     ]
     relations["linked from"] = [{"id": i, "status": ctx.label(i)} for i in ctx.linked_from.get(item.id, [])]
 
+    current_meaning = meaning(repo, basis)
     return {
+        "meaning": current_meaning,
+        "meaning_digest": meaning_digest(current_meaning) if current_meaning is not None else None,
         "id": item.id,
         "title": item.title,
         "kind": item.kind,

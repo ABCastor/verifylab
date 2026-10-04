@@ -244,7 +244,9 @@ _RECEIPT_SHAPE = {
               "modules": _ListOf({"module": str, "ms": _NUMBER})},
 }
 _REVIEW_SHAPE = {"verdict": str, "target_sha256": str, "target_path": str, "compare_with": str, "meaning_digest": str,
-                 "meaning": {"files": _MapOf(str), "theorems": _ListOf(str), "witnesses": _ListOf(str),
+                 "trusted_ref": str, "trusted_commit": str,
+                 "meaning": {"semantic_environment": _MapOf(str), "semantic_environment_error": str,
+                             "files": _MapOf(str), "theorems": _ListOf(str), "witnesses": _ListOf(str),
                              "statement_sha256": str, "limits_sha256": str, "assumptions_sha256": str,
                              "closure_error": str}}
 

@@ -42,9 +42,12 @@ def register(sub):
     p.add_argument("--human-approved", action="store_true",
                    help="with --author human:NAME: NAME wrote or approved this text (without it, NAME is asked at "
                         "the terminal, and without a terminal nothing is written)")
+    p.add_argument("--expected-meaning-digest", metavar="SHA256",
+                   help="fidelity writes require the meaning_digest read from vl show --json or a review dry run")
     p.add_argument("--dry-run", action="store_true", help="print the review that would be written; write nothing")
     p.epilog = ("fidelity reviews bind to the meaning on the trusted ref: the target (or evaluator), the in-project "
-                "definitions it imports, the theorems and witnesses, and the item's statement, limits and assumptions "
+                "definitions it imports, the Lean semantic environment, the theorems and witnesses, and the item's "
+                "statement, limits and assumptions "
                 "(not its title or body); a change of any of them makes the review stale. Merge the lane first, then "
                 "review. Suggested compare verdicts (free text, not enforced): stronger, weaker, equivalent, "
                 "incomparable, clearer.")
@@ -62,6 +65,8 @@ def _usage_problems(args) -> list[str]:
         problems.append("a compare review needs --compare-with ID[@rev]")
     if args.kind != "compare" and args.compare_with:
         problems.append("--compare-with only applies to --kind compare")
+    if args.expected_meaning_digest is not None and args.kind != "fidelity":
+        problems.append("--expected-meaning-digest only applies to --kind fidelity")
     if args.acknowledge and args.kind != "fidelity":
         problems.append("--acknowledge only applies to --kind fidelity")
     return problems
@@ -94,6 +99,18 @@ def fidelity_revision_problem(target, basis_item) -> str | None:
         return ("fidelity reviews require the current trusted item revision; the requested revision is different. "
                 "Read the admitted target and text, then review the item without @rev or with its trusted revision; "
                 "use a correction or understanding review for historical commentary")
+    return None
+
+
+def expected_meaning_problem(args, current_digest: str) -> str | None:
+    """The caller supplies the context read; equality does not establish understanding or independence."""
+    expected = args.expected_meaning_digest
+    if expected is None and not args.dry_run:
+        return ("a fidelity write requires --expected-meaning-digest from vl show --json or a review "
+                "dry run; read the admitted meaning before recording the judgement")
+    if expected is not None and expected != current_digest:
+        return ("the expected meaning digest differs from the current trusted meaning; nothing was "
+                "written. Read it again and renew the judgement")
     return None
 
 
@@ -133,6 +150,11 @@ def run(args) -> int:
         fields["target_sha256"] = recorded["files"][path]
         fields["meaning"] = recorded
         fields["meaning_digest"] = meaning_digest(recorded)
+        problem = expected_meaning_problem(args, fields["meaning_digest"])
+        if problem:
+            return fail(problem)
+        fields["trusted_ref"] = repo.config.trusted_ref
+        fields["trusted_commit"] = repo.trusted_commit
         fields["item_revision"] = basis_item.revision
         reviewed_item = basis_item
     if args.compare_with:

@@ -76,6 +76,7 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from .. import candidate_exec, gitref, jail, leanlint, leanmod
+from ..leanmod import lakefile_options
 from . import lean_probes
 from ..config import CONFIG_PATH, RULES_INPUT, Config, ConfigError, parse_config, rules_digest
 from ..machine import REVISIONS, Machine, MachineError, file_sha256 as machine_file_sha256, load as load_machine
@@ -365,22 +366,6 @@ def render_lakefile(packages_dir: Path | None, requires: list[dict[str, Any]], p
             lines.append(f"leanOptions = {_inline_options(options)}")
     return "\n".join(lines) + "\n"
 
-
-def lakefile_options(lakefile_toml: bytes | None, roots: tuple[str, ...]) -> tuple[dict[str, Any], dict[str, dict[str, Any]], str]:
-    """(package leanOptions, per-root lib leanOptions, provenance note) from the project's lakefile.toml."""
-    import tomllib
-
-    if lakefile_toml is None:
-        return {}, {}, "no lakefile.toml: leanOptions not propagated"
-    data = tomllib.loads(lakefile_toml.decode("utf-8"))
-    package = data.get("leanOptions", {}) or {}
-    per_root: dict[str, dict[str, Any]] = {}
-    for lib in data.get("lean_lib", []) or []:
-        lib_roots = lib.get("roots") or [lib.get("name")]
-        for root in roots:
-            if root in lib_roots and lib.get("leanOptions"):
-                per_root[root] = dict(lib["leanOptions"])
-    return dict(package), per_root, "lakefile.toml"
 
 
 def dependency_identity(packages_dir: Path, packages: list[dict[str, Any]], modules: Sequence[str]) -> dict[str, Any]:

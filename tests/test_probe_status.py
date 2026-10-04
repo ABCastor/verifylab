@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 from verifylab.cli import main
+from review_helpers import meaning_args
 from verifylab.records import review_problems, seal_receipt, seal_review, sha256_hex, write_new_json
 from verifylab.repo import Repo
 from verifylab.status import derive
@@ -106,11 +107,11 @@ def test_triviality_warns_until_a_fidelity_review_of_the_current_target_acknowle
     assert any(message in w for w in warnings(capsys))
 
     # A faithful review that does not acknowledge the triviality silences the fidelity warning only.
-    assert vl(capsys, "review", "add-zero", "--kind", "fidelity", "--verdict", "faithful", "--author",
+    assert vl(capsys, "review", "add-zero", "--kind", "fidelity", *meaning_args(), "--verdict", "faithful", "--author",
               "agent:referee", "--text", "States n + 0 = n.")[0] == 0
     commit_all(root)
     assert any(message in w for w in warnings(capsys))
-    rc, out, _ = vl(capsys, "review", "add-zero", "--kind", "fidelity", "--verdict", "faithful", "--author",
+    rc, out, _ = vl(capsys, "review", "add-zero", "--kind", "fidelity", *meaning_args(), "--verdict", "faithful", "--author",
                     "agent:referee", "--acknowledge", "trivial", "--text", "A definitional fact; trivial by design.",
                     "--json")
     assert rc == 0 and json.loads(out)["review"]["acknowledges"] == ["trivial"]
@@ -148,7 +149,7 @@ def test_card_states_proof_and_meaning_separately(research_repo, monkeypatch, ca
              "MEANING", "  fidelity: not reviewed", "EVIDENCE"]
     positions = [out.index(marker) for marker in order]
     assert positions == sorted(positions), out
-    vl(capsys, "review", "add-zero", "--kind", "fidelity", "--verdict", "faithful", "--author", "agent:referee",
+    vl(capsys, "review", "add-zero", "--kind", "fidelity", *meaning_args(), "--verdict", "faithful", "--author", "agent:referee",
        "--acknowledge", "trivial", "--text", "Trivial by design.")
     commit_all(root)
     out = vl(capsys, "show", "add-zero")[1]

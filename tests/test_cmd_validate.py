@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from verifylab.cli import main
+from review_helpers import meaning_args
 from verifylab.records import seal_receipt, seal_review, sha256_hex, write_new_json
 
 from conftest import synthetic_receipt, commit_all, git, item_question
@@ -263,7 +264,7 @@ def test_verified_without_fidelity_review_warns_and_review_clears_it(research_re
     commit_all(root, "admit")
     rc, out, _ = vl(capsys, "validate")
     assert "fidelity is 'not reviewed'" in out
-    vl(capsys, "review", "add-zero", "--kind", "fidelity", "--verdict", "faithful", "--author", "agent:test",
+    vl(capsys, "review", "add-zero", "--kind", "fidelity", *meaning_args(), "--verdict", "faithful", "--author", "agent:test",
        "--text", "states n + 0 = n over Nat")
     commit_all(root, "review")
     rc, out, _ = vl(capsys, "validate")

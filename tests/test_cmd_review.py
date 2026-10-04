@@ -5,6 +5,7 @@ import json
 import pytest
 
 from verifylab.cli import main
+from review_helpers import meaning_args
 from verifylab.records import sha256_hex, review_problems, write_new_json
 
 from conftest import commit_all, git
@@ -28,18 +29,18 @@ FIDELITY = ("review", "add-zero", "--kind", "fidelity", "--verdict", "faithful",
 def test_review_writes_one_immutable_record_bound_to_the_full_revision(research_repo, monkeypatch, capsys):
     root = research_repo
     monkeypatch.chdir(root)
-    rc, _, err = vl(capsys, *FIDELITY)
+    rc, _, err = vl(capsys, *FIDELITY, *meaning_args())
     assert rc == 2 and "needs an item with a [lean] target" in err
     item = root / "research" / "items" / "add-zero.md"
     item.write_text(item.read_text().replace("+++\nBody", '[lean]\ntarget = "research/targets/add-zero.lean"\n+++\nBody'))
     target = root / "research" / "targets" / "add-zero.lean"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("theorem main (n : Nat) : n + 0 = n := sorry\n")
-    rc, _, err = vl(capsys, *FIDELITY)
+    rc, _, err = vl(capsys, *FIDELITY, *meaning_args())
     assert rc == 2 and "merge the lane first" in err
     git(root, "add", "-A")
     git(root, "commit", "-q", "-m", "admit target")
-    rc, out, _ = vl(capsys, *FIDELITY, "--json")
+    rc, out, _ = vl(capsys, *FIDELITY, *meaning_args(), "--json")
     assert rc == 0
     data = json.loads(out)
     [file] = review_files(root)
@@ -52,7 +53,7 @@ def test_review_writes_one_immutable_record_bound_to_the_full_revision(research_
     assert review["target_path"] == "research/targets/add-zero.lean"
     assert review["target_sha256"] == sha256_hex(target.read_bytes())
 
-    rc, _, err = vl(capsys, *FIDELITY)
+    rc, _, err = vl(capsys, *FIDELITY, *meaning_args())
     assert rc == 2 and "identical review already exists" in err
     assert review_files(root) == [file]
     with pytest.raises(FileExistsError):
@@ -140,7 +141,7 @@ def test_historical_fidelity_cannot_review_the_current_trusted_revision(research
     before, after = changes[field]
     item.write_text(item.read_text().replace(before, after))
     commit_all(root, "revise claim")
-    args = list(FIDELITY)
+    args = [*FIDELITY, *meaning_args()]
     args[1] = f"add-zero@{old[:12]}"
     rc, _, err = vl(capsys, *args)
     assert rc == 2 and "fidelity reviews require the current trusted item revision" in err
@@ -156,7 +157,7 @@ def test_fidelity_records_trusted_revision_and_self_review_despite_worktree_auth
     item = _admit_fidelity_target(root)
     trusted_revision = git(root, "hash-object", "research/items/add-zero.md").strip()
     item.write_text(item.read_text().replace('author = "agent:test"', 'author = "agent:someone-else"'))
-    args = ("review", "add-zero", "--kind", "fidelity", "--verdict", "faithful", "--author", "agent:test",
+    args = ("review", "add-zero", "--kind", "fidelity", *meaning_args(), "--verdict", "faithful", "--author", "agent:test",
             "--text", "I authored and read the trusted target.", "--json")
     rc, out, _ = vl(capsys, *args, "--dry-run")
     assert rc == 0 and json.loads(out)["self_review"] is True
@@ -183,7 +184,7 @@ def test_disabling_the_revision_guard_accepts_a_request_for_the_wrong_meaning(
     item.write_text(item.read_text().replace('limits = ["Only natural numbers."]', "limits = []"))
     commit_all(root, "widen claim")
     monkeypatch.setattr(review, "fidelity_revision_problem", lambda *_: None)
-    args = list(FIDELITY)
+    args = [*FIDELITY, *meaning_args()]
     args[1] = f"add-zero@{old[:12]}"
     assert vl(capsys, *args)[0] == 0
     commit_all(root, "admit misattributed review")
@@ -203,7 +204,7 @@ def test_existing_misattributed_fidelity_is_rejected_without_editing_its_record(
     old = git(root, "hash-object", "research/items/add-zero.md").strip()
     item.write_text(item.read_text().replace('limits = ["Only natural numbers."]', "limits = []"))
     commit_all(root, "widen claim")
-    assert vl(capsys, *FIDELITY)[0] == 0
+    assert vl(capsys, *FIDELITY, *meaning_args())[0] == 0
     [file] = review_files(root)
     record = json.loads(file.read_text())
     record["item_revision"] = old      # reproduce a record written by the earlier buggy review command
@@ -225,7 +226,7 @@ def test_fidelity_accepts_the_explicit_current_trusted_revision(research_repo, m
     monkeypatch.chdir(root)
     _admit_fidelity_target(root)
     revision = git(root, "hash-object", "research/items/add-zero.md").strip()
-    args = list(FIDELITY)
+    args = [*FIDELITY, *meaning_args()]
     args[1] = f"add-zero@{revision[:12]}"
     assert vl(capsys, *args)[0] == 0 and len(review_files(root)) == 1
 
@@ -238,7 +239,7 @@ def test_valid_older_fidelity_remains_readable_and_only_meaning_changes_stale_it
     root = research_repo
     monkeypatch.chdir(root)
     item = _admit_fidelity_target(root)
-    assert vl(capsys, *FIDELITY)[0] == 0
+    assert vl(capsys, *FIDELITY, *meaning_args())[0] == 0
     commit_all(root, "admit valid review")
     before, after = (('limits = ["Only natural numbers."]', "limits = []") if change_meaning
                      else ("Body text.", "New commentary."))
