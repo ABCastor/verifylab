@@ -426,7 +426,9 @@ def test_receipt_records_isolation_and_where_the_time_went(lean_env, shared_case
     env = outcome.environment
     assert "Landlock" in env["isolation"]["landrun"] and env["isolation"]["memory_max"] == "12G"
     assert "Your solution is okay!" in outcome.log and "PROBE-DENIED" in outcome.log
-    assert outcome.command[:3] == [jail.program("systemd-run"), "--user", "--scope"]
+    assert outcome.command[:3] == [jail.program("systemd-run"), "--user", "--wait"]
+    assert "RestrictAddressFamilies=~AF_UNIX" in outcome.command
+    assert env["isolation"]["systemd_service"] and not env["isolation"]["systemd_scope"]
     assert jail.program("bwrap") in outcome.command
     assert "--slice=vl.slice" in outcome.command and env["isolation"]["slice"] == "vl.slice"
     # Phase timings: Comparator's lines arrive as printed (stdbuf -oL), Lake's per-module times, the scope's peak.

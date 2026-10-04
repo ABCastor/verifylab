@@ -14,7 +14,9 @@ import functools
 import os
 import re
 import selectors
+import secrets
 import subprocess
+import sys
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -72,6 +74,8 @@ class Jail:
     env: dict[str, str] = field(default_factory=dict)
     # (lower, upper, work, mountpoint): copy-on-write view of a read-only directory; writes land in upper
     overlays: tuple[tuple[Path, Path, Path, Path], ...] = ()
+    # Comparator's upstream mitigation must be inherited before bubblewrap starts.
+    deny_unix: bool = False
 
     def argv(self, command: Sequence[str]) -> list[str]:
         args = [program("bwrap") or "bwrap", "--unshare-all", "--die-with-parent", "--new-session", "--clearenv",
@@ -150,6 +154,57 @@ def memory_capped(argv: Sequence[str], memory_max: str | None, memory_total: str
             "-p", f"MemoryMax={memory_max}", "-p", "MemorySwapMax=0", "-p", f"TasksMax={TASKS_MAX}", "--", *argv]
 
 
+# Runs in the service before bwrap: refuse to execute any checked code unless the kernel actually denies
+# AF_UNIX. Use vl's own Python runtime outside the jail, so no additional interpreter has to be mounted.
+_UNIX_GUARD = r"""import errno, os, socket, sys
+try:
+    socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+except OSError as exc:
+    if exc.errno == errno.EAFNOSUPPORT:
+        os.execv(sys.argv[1], sys.argv[1:])
+sys.stderr.write('vl: AF_UNIX restriction is not enforced\n')
+sys.exit(125)
+"""
+
+
+def guarded_service(argv: Sequence[str], unit: str, timeout: float, memory_max: str | None,
+                    memory_total: str | None) -> list[str]:
+    """Comparator's documented outer systemd mitigation, with no uncapped scope fallback.
+
+    RuntimeMaxSec also bounds the service when the client disappears; an ordinary deadline explicitly stops
+    the entire unit. The guard checks actual enforcement immediately before each exec of bwrap.
+    """
+    systemd_run, systemctl = program("systemd-run"), program("systemctl")
+    if systemd_run is None or systemctl is None:
+        raise RuntimeError("protected Lean requires systemd-run and systemctl for its AF_UNIX restriction")
+    if memory_total:
+        cap_slice(memory_total)
+    caps = ["-p", f"MemoryMax={memory_max}", "-p", "MemorySwapMax=0"] if memory_max else []
+    return [systemd_run, "--user", "--wait", "--pipe", "--quiet", "--collect", "--service-type=exec",
+            "--expand-environment=no", f"--unit={unit}", f"--slice={SLICE}",
+            "-p", "RestrictAddressFamilies=~AF_UNIX", "-p", f"TasksMax={TASKS_MAX}",
+            "-p", f"RuntimeMaxSec={timeout}s", "-p", "TimeoutStopSec=0", "-p", "KillMode=control-group",
+            *caps, "--", sys.executable, "-I", "-S", "-c", _UNIX_GUARD, *argv]
+
+
+def _service_cgroup(unit: str) -> Path | None:
+    """Resolve the named service once it has started; systemd-run's client PID is outside its cgroup."""
+    try:
+        proc = subprocess.run([program("systemctl"), "--user", "show", "--property=ControlGroup", "--value", unit],
+                              capture_output=True, text=True, timeout=1)
+        group = proc.stdout.strip()
+        if proc.returncode == 0 and group.startswith("/"):
+            return Path("/sys/fs/cgroup" + group)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return None
+
+
+def _stop_service(unit: str) -> None:
+    """SIGKILL the complete service at the caller's deadline, including children that closed their output."""
+    subprocess.run([program("systemctl"), "--user", "stop", unit], capture_output=True, timeout=5)
+
+
 def run(jail: Jail, command: Sequence[str], *, timeout: float, memory_max: str | None = None,
         memory_total: str | None = None) -> subprocess.CompletedProcess[bytes]:
     """`stream` without the per-line record: the same deadline and the same bounded output. Raises
@@ -167,7 +222,8 @@ class Streamed:
     stderr: bytes
     lines: tuple[tuple[float, str, str], ...]    # (seconds since start, "stdout" | "stderr", line), as they arrived
     seconds: float                               # wall time of the whole command
-    memory_peak: int | None                      # bytes: memory.peak of its vl.slice scope (systemd's MemoryPeak)
+    memory_peak: int | None                      # bytes: memory.peak of its vl.slice unit
+    argv: tuple[str, ...]                        # the actual outer command, including its service unit
 
 
 def _scope_peak(pid: int) -> int | None:
@@ -259,7 +315,7 @@ class _Lines:
 def stream(jail: Jail, command: Sequence[str], *, timeout: float, memory_max: str | None = None,
            memory_total: str | None = None, poll: float = 0.25) -> Streamed:
     """Like `run`, but reads the output while the command runs: each line gets the time it arrived, and the
-    scope's memory.peak is read every `poll` seconds (a lower bound of the true peak by at most the last poll).
+    unit's memory.peak is read every `poll` seconds (a lower bound of the true peak by at most the last poll).
     Memory stays bounded however much the command prints: the output and its lines keep their beginning and their
     end, with a marker where the middle was dropped (STREAM_KEEP, STREAM_LINES, LINE_MAX).
     A timeout kills the command and keeps what it printed so far, also when the command closed its output and
@@ -267,8 +323,11 @@ def stream(jail: Jail, command: Sequence[str], *, timeout: float, memory_max: st
     if not available():
         raise RuntimeError("bubblewrap (bwrap) is not installed; protected checks are unsupported here")
     inner = jail.argv(command)
-    argv = memory_capped(inner, memory_max, memory_total)
+    unit = f"run-vl-{secrets.token_hex(12)}.service" if jail.deny_unix else None
+    argv = (guarded_service(inner, unit, timeout, memory_max, memory_total) if unit
+            else memory_capped(inner, memory_max, memory_total))
     scoped = argv != inner
+    cgroup: Path | None = None
     start = time.monotonic()
     proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     out = {"stdout": _Output(), "stderr": _Output()}
@@ -282,6 +341,8 @@ def stream(jail: Jail, command: Sequence[str], *, timeout: float, memory_max: st
             remaining = start + timeout - time.monotonic()
             if remaining <= 0:
                 timed_out = True
+                if unit:
+                    _stop_service(unit)
                 proc.kill()
                 break
             for key, _ in selector.select(min(poll, remaining)):
@@ -296,15 +357,26 @@ def stream(jail: Jail, command: Sequence[str], *, timeout: float, memory_max: st
                 for line in out[name].add(chunk):
                     lines.add((at, name, line))
             if scoped:
-                value = _scope_peak(proc.pid)
+                if unit:
+                    cgroup = cgroup or _service_cgroup(unit)
+                    try:
+                        value = int((cgroup / "memory.peak").read_text()) if cgroup else None
+                    except (OSError, ValueError):
+                        value = None
+                else:
+                    value = _scope_peak(proc.pid)
                 peak = peak if value is None else max(peak or 0, value)
     try:            # the output is closed; the deadline still holds for the process itself
         returncode = proc.wait(timeout=max(start + timeout - time.monotonic(), 0) if not timed_out else None)
     except subprocess.TimeoutExpired:
         timed_out = True
+        if unit:
+            _stop_service(unit)
         proc.kill()
         returncode = proc.wait()
     proc.stdout.close()
     proc.stderr.close()
+    if unit and returncode == 125 and b"vl: AF_UNIX restriction is not enforced" in out["stderr"].data():
+        raise RuntimeError("protected Lean AF_UNIX restriction is not enforced; refusing to run checked code")
     return Streamed(None if timed_out else returncode, out["stdout"].data(), out["stderr"].data(), lines.rows(),
-                    round(time.monotonic() - start, 3), peak)
+                    round(time.monotonic() - start, 3), peak, tuple(argv))
