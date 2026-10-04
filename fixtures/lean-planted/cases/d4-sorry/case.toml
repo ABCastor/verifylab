@@ -1,0 +1,9 @@
+description = "Defect 4: `sorry` in the proof."
+item = "double-even"
+expect = "fail"
+reasons = ["sorry"]
+
+[lean]
+target = "research/targets/double-even.lean"
+theorems = ["VL.DoubleEven.main"]
+proofs = { "VL.DoubleEven.main" = "sorry" }

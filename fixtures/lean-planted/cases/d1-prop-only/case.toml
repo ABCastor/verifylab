@@ -1,0 +1,9 @@
+description = "Defect 1: the candidate only states the claim as a compiled Prop, `def target_claim : Prop`, with no proof."
+item = "double-even"
+expect = "fail"
+reasons = ["does not declare target theorem 'VL.DoubleEven.main'"]
+
+[lean]
+target = "research/targets/double-even.lean"
+theorems = ["VL.DoubleEven.main"]
+solution = "Fixture.Solutions.PropOnly"

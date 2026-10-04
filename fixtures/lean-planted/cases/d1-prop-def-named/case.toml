@@ -1,0 +1,9 @@
+description = "Defect 1, variant: the target's own name is reused for a `def main : Prop`."
+item = "double-even"
+expect = "fail"
+reasons = ["is not a theorem in the solution"]
+
+[lean]
+target = "research/targets/double-even.lean"
+theorems = ["VL.DoubleEven.main"]
+solution = "Fixture.Solutions.PropNamed"

@@ -1,0 +1,9 @@
+description = "Genuine control: a different correct proof, inline tactics, no helper import."
+item = "double-even"
+expect = "pass"
+clean = ["VL.DoubleEven.main"]
+
+[lean]
+target = "research/targets/double-even.lean"
+theorems = ["VL.DoubleEven.main"]
+proofs = { "VL.DoubleEven.main" = "by unfold Fixture.double; omega" }

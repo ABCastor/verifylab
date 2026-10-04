@@ -1,0 +1,11 @@
+description = "Statement S5, trusted side: the binder n is never used, so the statement is a closed computation about 2. The triviality probe flags it."
+item = "double-even"
+stage = "trusted"
+expect = "pass"
+trivial = ["VL.DoubleEven.main"]
+guard = "probe_trivial"
+
+[lean]
+target = "research/targets/double-even.lean"
+theorems = ["VL.DoubleEven.main"]
+proofs = { "VL.DoubleEven.main" = "by decide" }

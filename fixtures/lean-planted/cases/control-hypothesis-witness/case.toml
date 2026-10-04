@@ -1,0 +1,12 @@
+description = "Genuine control with a hypothesis: 0 < n gives 0 < double n, plus a non-vacuity witness (the hypothesis holds at n = 1). Neither probe may flag the main theorem, and vl validate asks for no further witness."
+item = "double-even"
+stage = "trusted"
+expect = "pass"
+clean = ["VL.DoublePos.main"]
+
+[lean]
+target = "research/targets/double-pos.lean"
+theorems = ["VL.DoublePos.main", "VL.DoublePos.witness"]
+witnesses = ["VL.DoublePos.witness"]
+proofs = { "VL.DoublePos.main" = "Fixture.double_pos n h", "VL.DoublePos.witness" = "⟨1, Nat.one_pos⟩" }
+imports = ["Fixture.Proofs"]

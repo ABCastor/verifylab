@@ -1,0 +1,9 @@
+description = "Defect 2, variant: the solution module proves a helper and leaves the target `sorry`."
+item = "double-even"
+expect = "fail"
+reasons = ["sorry"]
+
+[lean]
+target = "research/targets/double-even.lean"
+theorems = ["VL.DoubleEven.main"]
+solution = "Fixture.Solutions.HelperOnly"

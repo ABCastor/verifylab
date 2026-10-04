@@ -1,0 +1,6 @@
+The 20 project folders here are copied unchanged from Comparator (https://github.com/leanprover/comparator),
+folder tests/projects/, at revision 19e111e2141cf333c7daff0f64c5f24acc91dd2e (2026-08-21).
+Copyright (c) 2025 Lean FRO, LLC. Licensed under the Apache License, Version 2.0: see LICENSE in this folder.
+
+vl uses them as a known-answer gate (tests/test_comparator_known.py): each project must give, through vl's
+jailed Comparator invocation, the exit code its test.json expects.

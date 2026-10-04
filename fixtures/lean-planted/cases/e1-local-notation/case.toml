@@ -1,0 +1,11 @@
+description = "Statement S2 / E1: a candidate module redefines `Fixture.double` by `local notation`, then proves the hijacked statement by rfl. Comparator rejects it (the elaborated statement differs); the command lint flags the notation."
+item = "double-even"
+expect = "fail"
+reasons = ["statement of 'VL.DoubleEven.main' differs from the target's"]
+lint = "notation"
+guard = "lints"
+
+[lean]
+target = "research/targets/double-even.lean"
+theorems = ["VL.DoubleEven.main"]
+solution = "Fixture.Solutions.Hijack"

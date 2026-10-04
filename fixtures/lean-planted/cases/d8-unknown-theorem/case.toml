@@ -1,0 +1,11 @@
+description = "Defect 8: the trusted item lists a theorem the target does not declare."
+item = "double-even"
+stage = "trusted"
+expect = "error"
+reasons = ["theorem 'VL.DoubleEven.lemma2' is not declared in the target"]
+
+[lean]
+target = "research/targets/double-even.lean"
+theorems = ["VL.DoubleEven.main", "VL.DoubleEven.lemma2"]
+proofs = { "VL.DoubleEven.main" = "Fixture.double_mod_two n", "VL.DoubleEven.lemma2" = "trivial" }
+imports = ["Fixture.Proofs"]

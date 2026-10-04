@@ -1,0 +1,11 @@
+description = "Statement S5, written on the trusted side: the target is `P ∨ True`. Comparator passes (the proof matches the fixed target); the triviality probe flags it."
+item = "double-even"
+stage = "trusted"
+expect = "pass"
+trivial = ["VL.DoubleEven.main"]
+guard = "probe_trivial"
+
+[lean]
+target = "research/targets/double-even.lean"
+theorems = ["VL.DoubleEven.main"]
+proofs = { "VL.DoubleEven.main" = "Or.inr trivial" }

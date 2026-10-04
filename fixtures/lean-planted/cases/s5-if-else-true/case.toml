@@ -1,0 +1,11 @@
+description = "Statement S5, trusted side: `if c then P else True` with a condition that never holds, so the claim P is never made. The triviality probe flags it."
+item = "double-even"
+stage = "trusted"
+expect = "pass"
+trivial = ["VL.DoubleEven.main"]
+guard = "probe_trivial"
+
+[lean]
+target = "research/targets/double-even.lean"
+theorems = ["VL.DoubleEven.main"]
+proofs = { "VL.DoubleEven.main" = "by simp" }

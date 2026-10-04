@@ -1,0 +1,15 @@
+VerifyLab
+
+The VerifyLab code is licensed under Apache-2.0 (see LICENSE). Bundled Comparator
+known-answer fixtures retain their upstream LICENSE and NOTICE in fixtures/comparator-known/.
+
+Castor signature artwork
+Copyright (c) 2026 Anneo22
+
+The Apache-2.0 licence does not cover the name "Castor", its logos and marks,
+Chip the beaver mascot, or the signature artwork in docs/castor-footer-*.svg
+and docs/castor-footer-*.png. These remain all rights reserved.
+You may keep them in an unmodified copy or fork of this repository. Remove or
+replace them before you ship a modified version under your own name.
+
+The signature assets are reused unchanged from ABCastor/crossfeed-orchestrator.

@@ -1,0 +1,30 @@
+# VerifyLab machine configuration: copy to ~/.config/verifylab/machine.toml ($XDG_CONFIG_HOME honoured) and
+# uncomment what this computer needs. It belongs to the machine, never to a project: no branch can change it.
+# Every path is absolute. A protected check records this file's path and sha256 in its receipt.
+
+[tools]
+# Verifier tools. A protected check runs a tool only when a REVISIONS file next to it pins its sha256;
+# `vl init --tools --comparator PATH ...` copies tools into ~/.local/share/verifylab/tools/<toolchain>/ and pins them,
+# and is used when no key below names the tool.
+# comparator = "/opt/verifylab/comparator"
+# lean4export = "/opt/verifylab/lean4export"
+# landrun = "/opt/verifylab/landrun"
+# nanoda = "/opt/verifylab/nanoda_bin"
+# Where Lean toolchains are installed (default: the account's ~/.elan); vl never downloads a toolchain.
+# elan_home = "/opt/elan"
+
+[caches]
+# A project's built Lake directory (its packages/ holds Mathlib), keyed by the path of the project's main checkout.
+# Checks mount its packages read-only; lanes see it through a copy-on-write overlay.
+# "/srv/research/project" = "/srv/research/project/.lake"
+
+[check]
+# Memory cap of all vl runs together on this machine (systemd MemoryMax of the slice vl.slice they share).
+# Default: 70% of physical RAM.
+# memory_total = "20G"
+
+[launchers]
+# System programs vl starts, by absolute path: bwrap, systemd-run, systemctl, env, stdbuf, sh, git. Default: the
+# first of /usr/bin, /bin, /usr/sbin, /sbin that has it; never the caller's PATH. Programs started inside the jail
+# (env, stdbuf, sh, git) must live under a folder the jail mounts (/usr, /bin, ...).
+# bwrap = "/usr/bin/bwrap"

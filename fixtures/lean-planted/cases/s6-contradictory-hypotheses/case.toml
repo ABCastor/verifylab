@@ -1,0 +1,11 @@
+description = "Statement S6, trusted side: hypotheses that can never hold together (n < 2 and 3 < n) make a false conclusion provable. The vacuity probe derives False from them: status vacuous."
+item = "double-even"
+stage = "trusted"
+expect = "pass"
+vacuous = ["VL.DoubleEven.main"]
+guard = "probe_vacuous"
+
+[lean]
+target = "research/targets/double-even.lean"
+theorems = ["VL.DoubleEven.main"]
+proofs = { "VL.DoubleEven.main" = "by omega" }

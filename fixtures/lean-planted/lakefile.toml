@@ -1,0 +1,9 @@
+name = "fixture"
+version = "0.1.0"
+defaultTargets = ["Fixture"]
+
+[leanOptions]
+autoImplicit = false
+
+[[lean_lib]]
+name = "Fixture"

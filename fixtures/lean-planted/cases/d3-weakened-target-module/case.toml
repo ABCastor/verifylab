@@ -1,0 +1,9 @@
+description = "Defect 3, variant: weakened worktree target (multi-line `∨ True`) plus a solution module proving the weakened statement."
+item = "double-even"
+expect = "fail"
+reasons = ["statement of 'VL.DoubleEven.main' differs from the target's"]
+
+[lean]
+target = "research/targets/double-even.lean"
+theorems = ["VL.DoubleEven.main"]
+solution = "Fixture.Solutions.Weak"

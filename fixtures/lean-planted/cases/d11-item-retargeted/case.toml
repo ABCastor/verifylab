@@ -1,0 +1,9 @@
+description = "Extra: the candidate points its item at an easier target it added; protected mode takes target and theorems from the trusted item."
+item = "double-even"
+expect = "fail"
+reasons = ["no proof for trusted target theorem(s) ['VL.DoubleEven.main']", "the trusted values were used"]
+
+[lean]
+target = "research/targets/easy.lean"
+theorems = ["VL.Easy.main"]
+proofs = { "VL.Easy.main" = "trivial" }

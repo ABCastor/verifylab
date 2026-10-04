@@ -1,0 +1,9 @@
+description = "Defect 6: `native_decide` (trusts the compiler; an auxiliary axiom, not permitted)."
+item = "double-value"
+expect = "fail"
+reasons = ["native_decide"]
+
+[lean]
+target = "research/targets/double-value.lean"
+theorems = ["VL.DoubleValue.main"]
+proofs = { "VL.DoubleValue.main" = "by native_decide" }

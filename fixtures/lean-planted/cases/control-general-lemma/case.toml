@@ -1,0 +1,10 @@
+description = "Genuine control: the target follows from a more general lemma (any divisor of 2)."
+item = "double-even"
+expect = "pass"
+clean = ["VL.DoubleEven.main"]
+
+[lean]
+target = "research/targets/double-even.lean"
+theorems = ["VL.DoubleEven.main"]
+proofs = { "VL.DoubleEven.main" = "Fixture.double_mod_of_dvd_two 2 n (Nat.dvd_refl 2)" }
+imports = ["Fixture.Proofs"]

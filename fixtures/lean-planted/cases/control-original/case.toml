@@ -1,0 +1,4 @@
+description = "Genuine control: the original proof (the item as committed on the trusted ref)."
+item = "double-even"
+expect = "pass"
+clean = ["VL.DoubleEven.main"]

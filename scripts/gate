@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Gate before closing a batch of work or pushing: the whole suite, Lean tests included, must pass with no failure, no
+# error and no skipped `lean` or `jail` test (tests/conftest.py prints how many were skipped). VL_GATE_ALLOW_SKIP=1
+# accepts skipped ones, loudly. Use it as `scripts/gate && git push`. Never pipe it: a pipe hides the exit code.
+# The suite runs without PYTEST_ADDOPTS and PYTEST_PLUGINS, which could select a part of it, and a summary that
+# reports deselected tests is refused.
+# scripts/fast runs the fast part for every commit.
+set -euo pipefail
+
+if (($#)); then
+    echo "gate: takes no arguments; it always runs the whole suite" >&2
+    exit 2
+fi
+cd "$(dirname "$0")/.."
+
+cmd=(env -u PYTEST_ADDOPTS -u PYTEST_PLUGINS uv run pytest -q -rs)
+if command -v systemd-run >/dev/null 2>&1 && command -v systemctl >/dev/null 2>&1 \
+    && systemctl --user show-environment >/dev/null 2>&1; then
+    cmd=(systemd-run --user --scope --quiet --collect -p MemoryMax=8G -p MemorySwapMax=0 -- "${cmd[@]}")
+fi
+
+log=$(mktemp)
+trap 'rm -f "$log"' EXIT
+code=0
+"${cmd[@]}" >"$log" 2>&1 || code=$?
+summary=$(grep -E '(passed|failed|errors?|skipped|deselected|no tests ran).* in [0-9.]+s' "$log" | tail -n 1 || true)
+skips=$(grep -E '^vl-gate: [0-9]+ lean/jail tests skipped$' "$log" | tail -n 1 || true)
+
+if ((code != 0)) || [[ -z $summary ]] || [[ $summary =~ [0-9]+\ (failed|errors?) ]]; then
+    cat "$log" >&2
+    echo "gate: REFUSED (pytest exit $code): ${summary:-no pytest summary line}" >&2
+    exit 1
+fi
+if [[ $summary =~ [0-9]+\ deselected ]]; then
+    cat "$log" >&2
+    echo "gate: REFUSED: tests were deselected ($summary); the gate runs the whole suite" >&2
+    exit 1
+fi
+if [[ -z $skips ]]; then
+    cat "$log" >&2
+    echo "gate: REFUSED: no 'vl-gate: N lean/jail tests skipped' line, so skipped Lean and jail tests cannot be counted" >&2
+    exit 1
+fi
+skipped=${skips//[^0-9]/}
+if ((skipped > 0)); then
+    if [[ ${VL_GATE_ALLOW_SKIP:-} != 1 ]]; then
+        cat "$log" >&2
+        echo "gate: REFUSED: $skipped lean/jail tests were skipped and did not run ($summary); provide what they" \
+             "need (the reasons are listed above), or set VL_GATE_ALLOW_SKIP=1 to accept that" >&2
+        exit 1
+    fi
+    echo "gate: WARNING: $skipped LEAN/JAIL TESTS WERE SKIPPED AND DID NOT RUN (VL_GATE_ALLOW_SKIP=1)"
+fi
+echo "gate: ok: $summary"

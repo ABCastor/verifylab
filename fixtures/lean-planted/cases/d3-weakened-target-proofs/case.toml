@@ -1,0 +1,9 @@
+description = "Defect 3: the candidate weakens its worktree copy of the target with a multi-line `∨ True` and proves the weak form by a proof term."
+item = "double-even"
+expect = "fail"
+reasons = ["does not compile", "differs from the trusted one and was ignored"]
+
+[lean]
+target = "research/targets/double-even.lean"
+theorems = ["VL.DoubleEven.main"]
+proofs = { "VL.DoubleEven.main" = "Or.inr trivial" }

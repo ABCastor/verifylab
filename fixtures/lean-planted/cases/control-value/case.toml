@@ -1,0 +1,3 @@
+description = "Genuine control for the closed target: `rfl` (kernel evaluation, no compiler trust)."
+item = "double-value"
+expect = "pass"

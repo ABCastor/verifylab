@@ -1,0 +1,10 @@
+description = "Defect 5: an extra axiom, `axiom cheat : False`, proves anything."
+item = "double-even"
+expect = "fail"
+reasons = ["axiom 'Fixture.cheat'"]
+
+[lean]
+target = "research/targets/double-even.lean"
+theorems = ["VL.DoubleEven.main"]
+proofs = { "VL.DoubleEven.main" = "Fixture.cheat.elim" }
+imports = ["Fixture.Cheat"]

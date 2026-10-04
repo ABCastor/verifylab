@@ -1,0 +1,10 @@
+description = "Defect 2: the proof term points to a proved helper, not to a proof of the target."
+item = "double-even"
+expect = "fail"
+reasons = ["does not compile", "Fixture.double_eq_two_mul"]
+
+[lean]
+target = "research/targets/double-even.lean"
+theorems = ["VL.DoubleEven.main"]
+proofs = { "VL.DoubleEven.main" = "Fixture.double_eq_two_mul n" }
+imports = ["Fixture.Proofs"]

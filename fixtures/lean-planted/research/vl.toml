@@ -1,0 +1,10 @@
+# Planted-defect fixture for the Lean checker (no Mathlib). Tests copy this folder into a temporary
+# git repository, commit it on branch `trusted`, then apply one case from `cases/` as the candidate.
+[project]
+name = "lean-planted"
+
+[lean]
+project = "."
+roots = ["Fixture"]
+permitted_axioms = ["propext", "Quot.sound", "Classical.choice"]
+external_kernels = true

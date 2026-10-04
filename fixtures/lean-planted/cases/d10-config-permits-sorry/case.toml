@@ -1,0 +1,9 @@
+description = "Extra: the candidate edits its worktree research/vl.toml to permit sorryAx; protected mode reads the config from the trusted ref."
+item = "double-even"
+expect = "fail"
+reasons = ["sorry"]
+
+[lean]
+target = "research/targets/double-even.lean"
+theorems = ["VL.DoubleEven.main"]
+proofs = { "VL.DoubleEven.main" = "sorry" }

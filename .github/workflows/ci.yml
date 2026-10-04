@@ -1,0 +1,93 @@
+name: VerifyLab
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verifylab-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fast:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        python: ["3.11", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install fast-suite prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          python -m pip install uv==0.10.12
+          uv sync --frozen
+      - name: Fast tests
+        run: scripts/fast
+
+  protected:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      ELAN_TOOLCHAIN: leanprover/lean4:v4.34.0-rc2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.0"
+          cache: false
+      - name: Prepare compilers and Linux isolation
+        run: |
+          echo "VL_TEST_MATHLIB=$RUNNER_TEMP/verifylab-mathlib" >> "$GITHUB_ENV"
+          sudo apt-get update
+          sudo apt-get install -y build-essential elan meson ninja-build pkg-config libcap-dev
+          python -m pip install uv==0.10.12
+          uv sync --frozen
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup default 1.98.1
+          elan toolchain install "$ELAN_TOOLCHAIN"
+          # Ubuntu's packaged bubblewrap predates the overlay options used by lane execution.
+          git clone --branch v0.13.0 --depth 1 https://github.com/containers/bubblewrap.git "$RUNNER_TEMP/bubblewrap"
+          meson setup "$RUNNER_TEMP/bubblewrap/build" "$RUNNER_TEMP/bubblewrap" --prefix=/usr
+          ninja -C "$RUNNER_TEMP/bubblewrap/build"
+          sudo ninja -C "$RUNNER_TEMP/bubblewrap/build" install
+          # This change is confined to the disposable CI machine; bubblewrap still creates network namespaces.
+          if sysctl kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          bwrap --unshare-all --ro-bind / / --proc /proc --dev /dev -- true
+      - name: Build and pin verifier tools
+        run: scripts/install-tools.sh "$RUNNER_TEMP/verifylab-tools"
+      - name: Prepare the pinned Mathlib cache required by the full gate
+        run: |
+          mkdir -p "$VL_TEST_MATHLIB"
+          printf '%s\n' "$ELAN_TOOLCHAIN" > "$VL_TEST_MATHLIB/lean-toolchain"
+          cat > "$VL_TEST_MATHLIB/lakefile.toml" <<'TOML'
+          name = "verifylab_ci"
+          version = "0.1.0"
+          [[require]]
+          name = "mathlib"
+          scope = "leanprover-community"
+          git = "https://github.com/leanprover-community/mathlib4.git"
+          rev = "85e3a25e006c35636f0e53b0e9296caca2685bc0"
+          TOML
+          cd "$VL_TEST_MATHLIB"
+          lake update
+          lake exe cache get Mathlib.Data.Finset.Card
+          lake build Mathlib.Data.Finset.Card
+      - name: Full gate, including jailed checks, planted Lean cases and known-answer cases
+        run: scripts/gate
+      - name: Build and exercise the installed wheel
+        run: |
+          uv build --wheel
+          python scripts/smoke-wheel.py dist/*.whl

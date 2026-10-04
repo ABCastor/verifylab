@@ -1,0 +1,11 @@
+description = "E2 / E6: the trusted target is `P ∨ True` (folder trusted/, committed on the trusted ref) and the candidate's module runs build-time code that empties the challenge's compiled module after Comparator exported it. The probes read a copy built before any candidate code, so they still flag the target; the lint flags run_cmd."
+item = "double-even"
+expect = "pass"
+trivial = ["VL.DoubleEven.main"]
+lint = "run_cmd"
+guard = "probe_snapshot"
+
+[lean]
+target = "research/targets/double-even.lean"
+theorems = ["VL.DoubleEven.main"]
+solution = "Fixture.Solutions.Tamper"

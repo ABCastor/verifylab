@@ -1,0 +1,10 @@
+description = "Defect 9: malformed [lean] table, both `proofs` and `solution`."
+item = "double-even"
+expect = "error"
+reasons = ["exactly one of 'proofs'"]
+
+[lean]
+target = "research/targets/double-even.lean"
+theorems = ["VL.DoubleEven.main"]
+proofs = { "VL.DoubleEven.main" = "Fixture.double_mod_two n" }
+solution = "Fixture.Proofs"

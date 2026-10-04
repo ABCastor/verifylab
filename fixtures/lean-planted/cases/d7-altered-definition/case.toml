@@ -1,0 +1,9 @@
+description = "Defect 7: the candidate redefines `Fixture.double` as `0`, making the statement trivial; proved by `rfl`."
+item = "double-even"
+expect = "fail"
+reasons = ["declaration 'Fixture.double'", "differs between the trusted definitions and the candidate"]
+
+[lean]
+target = "research/targets/double-even.lean"
+theorems = ["VL.DoubleEven.main"]
+proofs = { "VL.DoubleEven.main" = "rfl" }

@@ -1,0 +1,47 @@
+# VerifyLab project configuration. vl reads this file as committed on the trusted ref (git config vl.trustedRef,
+# written by `vl init`); a worktree or lane edit changes nothing until it is integrated there. Status is derived by
+# vl: nothing here declares a result verified. Unknown keys are ignored. Of this file only [lean] permitted_axioms,
+# external_kernels, project and roots bind receipts (editing them stales receipts; editing anything else does not).
+# Machine-local settings (tool paths, Lean toolchains, build caches, the cap of all runs together) belong in
+# ~/.config/verifylab/machine.toml. Deprecated and ignored here: [project] trusted_ref, [check] memory_total.
+
+[project]
+# Display name.
+name = $name
+# Folder of items, targets, evidence, reviews and evaluators; this file itself always stays at research/vl.toml.
+# research_dir = "research"
+
+[lean]
+# Lake project directory, relative to the repository root.
+project = "."
+# Top-level module names of the project (folders under the Lake project): imports under them are in-project, read
+# from the trusted ref by a protected check; `vl find` indexes their .lean files. `vl check` needs at least one.
+roots = $roots
+# Axioms a check accepts; everything else, sorryAx and native_decide's axioms included, fails it.
+permitted_axioms = ["propext", "Quot.sound", "Classical.choice"]
+# Replay every check with nanoda as a second kernel (machine.toml or vl init --tools); while on, a protected check on
+# a machine without nanoda is unsupported, and a pass only the Lean kernel replayed does not count.
+# external_kernels = true
+# Machine-local paths, prefer machine.toml [caches]: the built Lake directory, or its packages/ folder only.
+# cache = "/abs/path/.lake"
+# packages = "/abs/path/.lake/packages"
+
+[tools]
+# Interpreter of python-eval checks; it must lie under /usr, /bin, /lib, /lib64, /sbin or /etc.
+# python = "/usr/bin/python3"
+# Deprecated: comparator, lean4export, landrun and nanoda paths belong in machine.toml [tools] (or `vl init --tools`).
+
+[lanes]
+# Relative to the main checkout: the folder that holds, for each repository, a folder of its lanes (worktrees,
+# metadata, overlays), named after the checkout and its git common directory. Sibling repositories may share it.
+dir = "../.vl-lanes"
+# `vl lane new` refuses to open more lanes than this.
+max_parallel = 3
+
+[check]
+# Memory cap of one run, a check or a `vl lane exec` (systemd MemoryMax of its scope).
+memory_max = "16G"
+# Statement probes after a pass: heartbeats per tactic attempt, in thousands as Lean's maxHeartbeats (at least 1000).
+# probe_heartbeats = 5000
+# Statement probes: seconds for the whole probe run (at least 10); a probe that runs out records null, never a verdict.
+# probe_timeout = 300
