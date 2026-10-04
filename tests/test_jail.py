@@ -205,3 +205,55 @@ def test_comparator_service_cannot_run_without_a_user_manager(tmp_path, monkeypa
     result = jail.run(jail.Jail(workdir=tmp_path, deny_unix=True),
                       ["/bin/sh", "-c", "touch should-not-exist"], timeout=5)
     assert result.returncode != 0 and not (tmp_path / "should-not-exist").exists()
+
+
+@bwrap
+@pytest.mark.parametrize("close_output", [False, True])
+@pytest.mark.parametrize("stop_error", [OSError("injected stop failure"),
+                                         subprocess.TimeoutExpired(["systemctl"], 5),
+                                         RuntimeError("injected nonzero stop status")])
+def test_comparator_stop_failure_keeps_timeout_and_reaps_client(tmp_path, monkeypatch, close_output, stop_error):
+    """A failed service stop leaves cleanup unconfirmed; the client and its pipes are still released."""
+    popen, service, stop = subprocess.Popen, jail.guarded_service, jail._stop_service
+    clients = []
+    def tracked_popen(argv, *args, **kwargs):
+        proc = popen(argv, *args, **kwargs)
+        if argv[0] == jail.program("systemd-run") and "--wait" in argv:
+            clients.append(proc)
+        return proc
+    def longer_service(*args):
+        argv = service(*args)
+        # Keep the service alive long enough to demonstrate that client cleanup does not establish child cleanup.
+        index = next(i for i, arg in enumerate(argv) if arg.startswith("RuntimeMaxSec="))
+        argv[index] = "RuntimeMaxSec=5s"
+        return argv
+    def failed_stop(unit):
+        raise stop_error
+    monkeypatch.setattr(subprocess, "Popen", tracked_popen)
+    monkeypatch.setattr(jail, "guarded_service", longer_service)
+    monkeypatch.setattr(jail, "_stop_service", failed_stop)
+    code = ("import os, time; print('started', flush=True); "
+            + ("os.close(1); os.close(2); " if close_output else "") + "time.sleep(30)")
+    unit = None
+    try:
+        run = jail.stream(jail.Jail(workdir=tmp_path, deny_unix=True), [system_python(), "-c", code], timeout=1)
+        unit = next(arg.split("=", 1)[1] for arg in run.argv if arg.startswith("--unit="))
+        assert run.returncode is None and run.stdout == b"started\n", run
+        assert len(clients) == 1 and clients[0].poll() is not None
+        assert clients[0].stdout.closed and clients[0].stderr.closed
+        assert b"service stop failed" in run.stderr and b"immediate service cleanup is unconfirmed" in run.stderr
+        assert b"RuntimeMaxSec remains the fallback" in run.stderr and unit.encode() in run.stderr
+        assert any(name == "vl" and "service stop failed" in line for _, name, line in run.lines)
+        state = subprocess.run([jail.program("systemctl"), "--user", "is-active", unit], capture_output=True)
+        assert state.returncode == 0, state.stdout
+    finally:
+        if unit:
+            stop(unit)
+
+
+
+def test_service_stop_nonzero_status_is_an_error(monkeypatch):
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs:
+                        subprocess.CompletedProcess(args[0], 1, "", "injected manager refusal"))
+    with pytest.raises(RuntimeError, match="injected manager refusal"):
+        jail._stop_service("run-vl-test.service")

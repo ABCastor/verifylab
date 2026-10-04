@@ -202,7 +202,9 @@ def _service_cgroup(unit: str) -> Path | None:
 
 def _stop_service(unit: str) -> None:
     """SIGKILL the complete service at the caller's deadline, including children that closed their output."""
-    subprocess.run([program("systemctl"), "--user", "stop", unit], capture_output=True, timeout=5)
+    proc = subprocess.run([program("systemctl"), "--user", "stop", unit], capture_output=True, text=True, timeout=5)
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or f"systemctl stop exited with {proc.returncode}")
 
 
 def run(jail: Jail, command: Sequence[str], *, timeout: float, memory_max: str | None = None,
@@ -341,8 +343,6 @@ def stream(jail: Jail, command: Sequence[str], *, timeout: float, memory_max: st
             remaining = start + timeout - time.monotonic()
             if remaining <= 0:
                 timed_out = True
-                if unit:
-                    _stop_service(unit)
                 proc.kill()
                 break
             for key, _ in selector.select(min(poll, remaining)):
@@ -370,12 +370,21 @@ def stream(jail: Jail, command: Sequence[str], *, timeout: float, memory_max: st
         returncode = proc.wait(timeout=max(start + timeout - time.monotonic(), 0) if not timed_out else None)
     except subprocess.TimeoutExpired:
         timed_out = True
-        if unit:
-            _stop_service(unit)
         proc.kill()
         returncode = proc.wait()
-    proc.stdout.close()
-    proc.stderr.close()
+    finally:
+        try:
+            if timed_out and unit:
+                try:
+                    _stop_service(unit)
+                except (OSError, subprocess.TimeoutExpired, RuntimeError) as exc:
+                    diagnostic = (f"vl: timed out; service stop failed for {unit}: {exc}; "
+                                  "immediate service cleanup is unconfirmed; RuntimeMaxSec remains the fallback")
+                    out["stderr"].add(("\n" + diagnostic + "\n").encode())
+                    lines.add((round(time.monotonic() - start, 3), "vl", diagnostic))
+        finally:
+            proc.stdout.close()
+            proc.stderr.close()
     if unit and returncode == 125 and b"vl: AF_UNIX restriction is not enforced" in out["stderr"].data():
         raise RuntimeError("protected Lean AF_UNIX restriction is not enforced; refusing to run checked code")
     return Streamed(None if timed_out else returncode, out["stdout"].data(), out["stderr"].data(), lines.rows(),
