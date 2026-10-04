@@ -145,7 +145,7 @@ def single_kernel(repo: Repo, receipt: dict) -> bool:
     it does not count as a pass. (Protected checks refuse to run without nanoda then; older receipts may have one.)"""
     kernels = (receipt.get("checked") or {}).get("kernels")
     return (receipt.get("adapter") == "lean-comparator" and receipt.get("assurance") == "protected"
-            and receipt.get("verdict") == "pass" and isinstance(kernels, list) and "nanoda" not in kernels
+            and receipt.get("verdict") == "pass" and (not isinstance(kernels, list) or "nanoda" not in kernels)
             and repo.config.lean.external_kernels)
 
 

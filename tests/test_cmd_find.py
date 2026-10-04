@@ -5,7 +5,7 @@ import json
 from verifylab.cli import main
 from verifylab.records import seal_receipt, sha256_hex, write_new_json
 
-from conftest import commit_all, item_question
+from conftest import synthetic_receipt, commit_all, item_question
 
 NS_LEAN = """/- A block comment that mentions
    theorem decoy_in_comment : True := trivial -/
@@ -80,7 +80,7 @@ def test_find_status_comes_from_records_not_the_index(research_repo, monkeypatch
     monkeypatch.chdir(root)
     assert "status: unverified" in vl(capsys, "find", "natural")[1]
     lean = "Fixture/Basic.lean"
-    receipt = seal_receipt(dict(
+    receipt = synthetic_receipt(root, dict(
         item="add-zero", item_revision="a" * 40, question_digest=item_question(root, "add-zero"),
         adapter="lean-comparator", assurance="protected", verdict="pass",
         reasons=[], inputs={"digest": "d", "files": {lean: sha256_hex((root / lean).read_bytes())}},

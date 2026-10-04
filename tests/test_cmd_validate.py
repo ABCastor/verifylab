@@ -8,7 +8,7 @@ import pytest
 from verifylab.cli import main
 from verifylab.records import seal_receipt, seal_review, sha256_hex, write_new_json
 
-from conftest import commit_all, git, item_question
+from conftest import synthetic_receipt, commit_all, git, item_question
 
 
 def vl(capsys, *args):
@@ -40,7 +40,7 @@ def make_receipt(root: Path, item_id: str = "add-zero", trusted: tuple[str, ...]
     inputs = {"digest": "d", "files": {lean: sha256_hex((root / lean).read_bytes())}}
     if trusted:
         inputs["trusted_files"] = {p: sha256_hex((root / p).read_bytes()) for p in trusted}
-    receipt = seal_receipt(dict(
+    receipt = synthetic_receipt(root, dict(
         item=item_id, item_revision="a" * 40, question_digest=item_question(root, item_id),
         adapter="lean-comparator", assurance=assurance, verdict="pass",
         reasons=[], inputs=inputs,
@@ -254,7 +254,7 @@ def test_verified_without_fidelity_review_warns_and_review_clears_it(research_re
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("theorem main (n : Nat) : n + 0 = n := sorry\n")
     lean = "Fixture/Basic.lean"
-    receipt = seal_receipt(dict(
+    receipt = synthetic_receipt(root, dict(
         item="add-zero", item_revision="a" * 40, question_digest=item_question(root),
         adapter="lean-comparator", assurance="protected", verdict="pass",
         reasons=[], inputs={"digest": "d", "files": {lean: sha256_hex((root / lean).read_bytes())}},
@@ -413,7 +413,7 @@ def _sealed_receipt(root: Path, **over) -> bytes:
             fields[target] = {**fields[target], sub: value}
         else:
             fields[target] = value
-    return json.dumps(seal_receipt(fields)).encode()
+    return json.dumps(synthetic_receipt(root, fields)).encode()
 
 
 MALFORMED_RECORDS = {

@@ -79,6 +79,9 @@ def research_repo(tmp_path: Path) -> Path:
     (root / "research" / "vl.toml").write_text(CONFIG)
     (root / "Fixture").mkdir()
     (root / "Fixture" / "Basic.lean").write_text("theorem add_zero' (n : Nat) : n + 0 = n := rfl\n")
+    target = root / "ReceiptFixture.lean"
+    target.write_text("theorem receipt : True := sorry\n")
+    (root / "Fixture" / "Evaluator.py").write_text("CASES = [1]\n")
     write_item(root, "add-zero")
     git(root, "add", "-A")
     git(root, "commit", "-q", "-m", "init")
@@ -90,6 +93,30 @@ def item_question(root: Path, item_id: str = "add-zero") -> str:
     from verifylab.records import parse_item, question_digest
     rel = f"research/items/{item_id}.md"
     return question_digest(parse_item((root / rel).read_bytes(), rel))
+
+
+def synthetic_receipt(root: Path | None, fields: dict) -> dict:
+    """Generated-shaped test evidence; these fixtures do not claim a verifier ran."""
+    from verifylab.records import canonical_json, seal_receipt, sha256_hex
+    target_path = "ReceiptFixture.lean"
+    digest = sha256_hex((root / target_path).read_bytes()) if root else "b" * 64
+    commit = git(root, "rev-parse", "HEAD").strip() if root else "a" * 40
+    target = {"path": target_path, "sha256": digest, "source": "trusted-commit", "commit": commit,
+              "theorems": ["Fixture.receipt"]}
+    checked = {"theorems": target["theorems"], "kernels": ["lean", "nanoda"], "permitted_axioms": []}
+    tools = {name: {"path": f"/fixture/{name}", "sha256": "c" * 64}
+             for name in ("comparator", "lean4export", "landrun", "nanoda")}
+    environment = {"toolchain": "leanprover/lean4:v4.24.0", "lean_version": "Lean fixture",
+                   "tools": tools, "isolation": {"kind": "bwrap+landrun"}}
+    inputs = {"trusted_commit": commit, "trusted_files": {target_path: digest}, **fields.get("inputs", {})}
+    inputs["trusted_files"] = {target_path: digest, **inputs["trusted_files"]} if isinstance(
+        inputs["trusted_files"], dict) else inputs["trusted_files"]
+    fields = {**fields, "inputs": inputs, "target": fields.get("target", target),
+              "checked": {**checked, **fields.get("checked", {})},
+              "environment": {**environment, **fields.get("environment", {})}}
+    basis = {"files": inputs["files"], "trusted_files": inputs["trusted_files"], "target": fields["target"]}
+    inputs["digest"] = "sha256:" + sha256_hex(canonical_json(basis).encode())
+    return seal_receipt(fields)
 
 
 def commit_all(root: Path, message: str = "update") -> None:

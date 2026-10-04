@@ -18,7 +18,7 @@ from verifylab.config import CHECK_INPUT, RULES_INPUT, VERDICT_INPUT, check_dige
 from verifylab.records import seal_receipt, sha256_hex, write_new_json
 from verifylab.repo import Repo
 
-from conftest import commit_all, git, item_question
+from conftest import synthetic_receipt, commit_all, git, item_question
 
 CONFIG = "research/vl.toml"
 
@@ -29,7 +29,7 @@ def admit_receipt(root: Path, trusted_input: str) -> Path:
     digest = {RULES_INPUT: rules_digest, VERDICT_INPUT: verdict_digest, CHECK_INPUT: check_digest}.get(
         trusted_input, lambda _: sha256_hex((root / CONFIG).read_bytes()))(repo.config)
     lean = "Fixture/Basic.lean"
-    receipt = seal_receipt(dict(
+    receipt = synthetic_receipt(root, dict(
         item="add-zero", item_revision="a" * 40, question_digest=item_question(root, "add-zero"),
         adapter="lean-comparator", assurance="protected", verdict="pass",
         reasons=[], inputs={"digest": "d", "files": {lean: sha256_hex((root / lean).read_bytes())},

@@ -18,7 +18,7 @@ from verifylab.records import seal_receipt, seal_review, sha256_hex, write_new_j
 from verifylab.render import Context
 from verifylab.repo import Repo
 
-from conftest import commit_all, git, item_question, write_item
+from conftest import synthetic_receipt, commit_all, git, item_question, write_item
 
 LEAN = "Fixture/Basic.lean"
 
@@ -26,7 +26,7 @@ LEAN = "Fixture/Basic.lean"
 def receipt(root: Path, item_id: str = "add-zero", verdict: str = "pass", finished: str = "2026-10-01T10:00:00+00:00",
             checked: dict | None = None, **extra) -> Path:
     exists = (root / "research" / "items" / f"{item_id}.md").is_file()
-    data = seal_receipt(dict(
+    data = synthetic_receipt(root, dict(
         item=item_id, item_revision="a" * 40,
         question_digest=item_question(root, item_id) if exists else "sha256:" + "0" * 64,
         adapter="lean-comparator", assurance="protected", verdict=verdict,
@@ -470,7 +470,7 @@ def test_a_pass_checked_under_an_overridden_machine_policy_says_so(research_repo
     st = status(root)
     assert st.label == "verified" and not any("machine policy" in n for n in st.notes)   # control
     git(root, "rm", "-q", str(path))
-    data = seal_receipt(dict(
+    data = synthetic_receipt(root, dict(
         item="add-zero", item_revision="a" * 40, question_digest=item_question(root, "add-zero"),
         adapter="lean-comparator", assurance="protected", verdict="pass", reasons=[],
         inputs={"digest": "d", "files": {LEAN: sha256_hex((root / LEAN).read_bytes())}},

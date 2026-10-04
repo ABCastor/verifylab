@@ -12,13 +12,13 @@ from verifylab.records import receipt_problems, sha256_hex
 from verifylab.repo import Repo
 from verifylab.status import derive
 
-from conftest import commit_all, git, write_item, write_machine
+from conftest import synthetic_receipt, commit_all, git, write_item, write_machine
 
 LEAN_TABLE = '\n[lean]\ntarget = "research/targets/add-zero.lean"\ntheorems = ["VL.hard", "VL.easy"]\n'
 
 
 class FakeAdapter:
-    name = "fake"
+    name = "lean-comparator"
     seen = []
 
     def __init__(self, verdict="pass", crash=False):
@@ -33,9 +33,14 @@ class FakeAdapter:
             raise RuntimeError("boom")
         root = request.repo.root
         lean = "Fixture/Basic.lean"
+        data = synthetic_receipt(root, {"inputs": {"files": {lean: sha256_hex((root / lean).read_bytes())}}})
+        data["target"]["theorems"] = request.item.lean["theorems"]
+        data["checked"]["theorems"] = request.item.lean["theorems"]
+        if request.assurance == "exploratory":
+            data["target"]["source"] = "worktree"
         return CheckOutcome(self.verdict, [] if self.verdict == "pass" else ["mismatch"],
-                            {lean: sha256_hex((root / lean).read_bytes())}, {}, {"theorems": request.item.lean["theorems"]},
-                            {}, {}, ["fake"], "log")
+                            data["inputs"]["files"], data["inputs"]["trusted_files"], data["target"],
+                            data["environment"], data["checked"], ["fake"], "log")
 
 
 @pytest.fixture
@@ -173,14 +178,23 @@ def test_changing_the_question_after_a_check_stales_its_receipt(repo_with_lean, 
 
 
 class FakePythonAdapter(FakeAdapter):
+    name = "python-eval"
+
     def applies(self, item):
         return bool(item.python)
 
     def check(self, request):
         root = request.repo.root
         lean = "Fixture/Basic.lean"
-        return CheckOutcome("pass", [], {lean: sha256_hex((root / lean).read_bytes())}, {}, {"kind": "python"},
-                            {}, {}, ["fake"], "log")
+        evaluator = "Fixture/Evaluator.py"
+        digest = sha256_hex((root / evaluator).read_bytes())
+        return CheckOutcome("pass", [], {lean: sha256_hex((root / lean).read_bytes())}, {evaluator: digest},
+                            {"evaluator": evaluator, "sha256": digest, "candidate": lean, "entry": "solve",
+                             "source": "trusted-commit", "commit": request.trusted_commit, "cases_sha256": "e" * 64},
+                            {"interpreter": "/usr/bin/python3", "python_version": "Python fixture",
+                             "isolation": {"candidate": "jail", "judge": "jail"}},
+                            {"cases": 1, "passed": 1, "failed": 0, "judge_errors": 0, "cases_sha256": "e" * 64},
+                            ["fake"], "log")
 
 
 PYTHON_TABLE = ('\n[python]\nevaluator = "research/evaluators/e.py"\ncandidate = "experiments/solve.py"\n'

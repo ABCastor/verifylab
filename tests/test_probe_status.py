@@ -12,7 +12,7 @@ from verifylab.records import review_problems, seal_receipt, seal_review, sha256
 from verifylab.repo import Repo
 from verifylab.status import derive
 
-from conftest import commit_all, item_question
+from conftest import synthetic_receipt, commit_all, item_question
 
 TARGET = "research/targets/add-zero.lean"
 NULL = {"trivial_by": None, "vacuous_by": None, "prop_hypotheses": 0}
@@ -43,7 +43,7 @@ def receipt(root: Path, probes: dict | None, finished: str = "t1", assurance: st
         checked["lints"] = lints
     if probes is not None:
         checked.update(probes=probes, probe_run={"battery": ["simp"], "heartbeats_per_attempt": 5000, "problems": []})
-    data = seal_receipt(dict(
+    data = synthetic_receipt(root, dict(
         item="add-zero", item_revision="a" * 40, question_digest=item_question(root, "add-zero"),
         adapter="lean-comparator", assurance=assurance, verdict="pass",
         reasons=[], inputs={"digest": "d", "files": {lean: sha256_hex((root / lean).read_bytes())}},

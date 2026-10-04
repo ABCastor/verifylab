@@ -387,6 +387,13 @@ def test_receipt_fields_bind_candidate_and_trusted_inputs(lean_env, shared_cases
     assert "Fixture/Proofs.lean" not in outcome.trusted_files      # not in the target's closure
     assert outcome.target == {"path": target, "sha256": outcome.trusted_files[target],
                               "theorems": ["VL.DoubleEven.main"], "source": "trusted-commit", "commit": trusted}
+    from verifylab.commands.check import build_receipt
+    from verifylab.records import receipt_problems
+    from verifylab.repo import Repo
+    repo = Repo.open(root)
+    item = repo.load_item("double-even")
+    receipt = build_receipt(repo, item, item, "lean-comparator", "protected", trusted, outcome, "t0", "t1")
+    assert receipt_problems(json.loads(json.dumps(receipt))) == []
 
 
 @pytest.mark.lean
