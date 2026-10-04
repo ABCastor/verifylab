@@ -58,7 +58,9 @@ with tempfile.TemporaryDirectory(prefix="verifylab-wheel-") as scratch:
     git('add', 'research')
     git('commit', '-qm', 'admit receipt')
     assert cli('show', 'nth-prime')['items'][0]['status']['label'] == 'verified'
-    cli('review', 'nth-prime', '--kind', 'fidelity', '--verdict', 'faithful', '--author', 'agent:smoke', '--text', 'The evaluator checks the listed prime cases.')
+    context = cli('show', 'nth-prime')['items'][0]
+    cli('review', 'nth-prime', '--kind', 'fidelity', '--expected-meaning-digest', context['meaning_digest'],
+        '--verdict', 'faithful', '--author', 'agent:smoke', '--text', 'The evaluator checks the listed prime cases.')
     git('add', 'research')
     git('commit', '-qm', 'admit review')
     assert cli('show', 'nth-prime')['items'][0]['fidelity']['label'] == 'faithful'

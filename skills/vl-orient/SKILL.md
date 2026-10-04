@@ -18,7 +18,8 @@ discriminating work, and to integrate only what is checked.
   alternative roads, why each step helps, the next discriminating check, and closed roads with the reason each
   closed. Link supporting records by id; statuses come from `vl show`, never copied as enduring facts. The plan
   gives direction and assumptions for a reader to examine; it does not replace understanding the problem.
-  Prefer results that stand alone if the main attempt fails. A reduction to a famous open problem is not progress.
+  Prefer results that stand alone if the main attempt fails. A reduction to an open problem does not solve the
+  target; it can still establish an equivalence, a barrier or a useful reusable implication. State which.
 
 ## 1. Read the state (never from memory)
 - `vl validate` first. Fix or report its errors before anything else.
@@ -106,8 +107,9 @@ Parallelize latency, never authority.
 3. For every new or changed target, read the admitted file and judge its meaning: does it say what
    the question asks, is it non-vacuous, are the definitions right? Prefer a reviewer started with a clean
    context and the `vl-referee` skill (it can run while a slow check runs), or the human; a review by the
-   item's own author is marked as not independent. Record
-   `vl review <id> --kind fidelity --verdict faithful|too-weak|vacuous|wrong-definition|unclear --author agent:<you>`
+   item's own author is marked as not independent.
+   Read `vl show <id> --json`, retain `meaning_digest` and `trust.commit`, and read files at that commit. Record
+   `vl review <id> --kind fidelity --expected-meaning-digest <digest> --verdict faithful|too-weak|vacuous|wrong-definition|unclear --author agent:<you>`
    with `--text "<why>"`: it binds to the target, the definitions it imports, the theorems and the statement,
    limits and assumptions, and goes stale when any of them changes; commit it on the trusted branch to admit it. If you would not
    defend the target, revert the merge. `vacuous` means automation refutes the hypotheses (the result says

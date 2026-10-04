@@ -2,8 +2,9 @@
 
 ## Contract
 
-`vl` turns a question committed on a trusted ref and an answer in a worktree into a sealed receipt that anyone can
-re-check, and derives every status from receipts and reviews, never from what an agent writes.
+`vl` checks an answer in a worktree against a question committed on a trusted ref and records a sealed receipt.
+Status is derived from admitted records and their current bindings. Replay requires preserved checked inputs and
+a reconstructible tool environment; the integrator remains responsible for admission.
 
 ## Non-goals
 
@@ -45,7 +46,9 @@ What holds the boundary:
 
 - **Receipts.** A receipt is sealed (`receipt_id` is the sha256 of its content), bound to the digest of every input
   it read and of the question it answered, and admitted only when committed on the trusted ref. Any later change of
-  an input makes it stale. The seal shows an edit; admission, not the seal, is the guard.
+  an input makes it stale. Validation checks the aggregate digest and protected-pass coverage. The self-hash detects
+  changes without resealing; it is not authentication or execution attestation. Admission trusts the integrator,
+  who runs the protected check rather than merging a candidate-written receipt.
 - **Git reads.** Admitted records, relations and trusted files are read from the trusted commit's objects, never
   from the worktree's copy, so deleting or never checking out a record hides nothing: the commit's tree is listed
   once (`ls-tree -r -z`) and blobs come through one `git cat-file --batch` process per command. A failed read is
@@ -54,8 +57,10 @@ What holds the boundary:
   (`machine.toml` `[launchers]`, else `/usr/bin`, `/bin`, `/usr/sbin`, `/sbin`), never looked up in the caller's
   `PATH`, which could put a wrapper in front of the jail or of git; each receipt records them.
 - **Jail.** Every check and `vl lane exec` runs under bubblewrap: new namespaces (no network), cleared environment,
-  system folders read-only, only the listed folders mounted. With a systemd user manager each run is a scope in the
-  slice `vl.slice` with its own memory and task cap, and the slice has the machine's `memory_total`.
+  system folders read-only, only the listed folders mounted. Protected Lean commands run in an outer systemd
+  service enforcing `RestrictAddressFamilies=~AF_UNIX`; a trusted helper observes socket denial before exec of
+  bubblewrap. Missing enforcement stops the check. Other runs use optional resource scopes. Both unit types use
+  `vl.slice` with per-run memory/task caps and the slice's machine `memory_total`.
 - **Comparator** decides a Lean verdict: same statement, identical definitions in the statement's closure,
   permitted axioms, replay by the Lean kernel and nanoda. Its landrun (Landlock) sandbox runs nested in the jail,
   after a probe proves that Landlock denies a write the jail allows.
@@ -63,7 +68,10 @@ What holds the boundary:
   theorem alone and to refute its hypotheses, on a copy of the challenge built before any candidate code ran.
 - **Reviews** carry what no machine checks: a fidelity review binds to the meaning it read on the trusted ref (the
   target and the in-project definitions it imports, the theorems and witnesses, the item's claim text, limits and
-  assumptions) and goes stale when any of it changes; its independence comes from a reviewer started with a clean context. A
+  assumptions, plus the stable Lean semantic environment) and goes stale when any of it changes. New fidelity writes
+  require the expected meaning digest obtained before reading; each command reads one pinned trusted commit.
+  A clean-context reader can perform literal read-back before seeing intent and earlier verdicts; independence
+  remains a fallible procedure. A
   `human:` author is written only with `--human-approved` or after the person confirms at the terminal.
   Fidelity records name the current trusted item revision; explicit older revisions are refused. A resolvable
   recorded item revision that disagrees with the review's bound meaning is rejected, including records created
@@ -77,6 +85,9 @@ What holds the boundary:
 The boundary has one hole by design: a process of the same user can write any file `vl` reads. `vl` makes that
 detectable (reproduce a receipt from a clean clone; a protected trusted branch; a clean-context reviewer), never
 impossible. docs/CHEATS.md lists every known attack and what catches it.
+Incoming validation already rejects new candidate receipts and edits/deletions of evidence and existing reviews.
+Status enumerates the current trusted tree, not all historical commits: bypassing that integration policy can
+hide admitted evidence. Asserted `answers`, `refutes` and `uses` relations are not checked semantic implications.
 
 ## The protected check, step by step
 
@@ -115,7 +126,8 @@ Lean (adapters/lean_comparator.py), with the phase names the receipt records in 
 
 Every step from preflight on runs in the jail under the same memory cap, with bounded output, and within what
 remains of the check's `--timeout`; a command that closes its output and keeps running is still killed at the
-deadline.
+deadline. Protected Lean deadlines stop the whole service, including descendants that closed output;
+`RuntimeMaxSec` bounds the service if its client disappears.
 
 Python (adapters/python_eval.py): read the candidate files from the worktree (no symbolic link on the way) and
 copy them; take the evaluator from the trusted commit, after checking that the trusted item binds this
@@ -155,7 +167,7 @@ records.py                    item parsing, question digest, receipt and review 
 status.py                     derived status and fidelity
 render.py                     cards, briefs and impact views
 index.py                      SQLite search cache of items and Lean declaration names
-jail.py                       bubblewrap jail, systemd scopes and the vl.slice cap, bounded streaming
+jail.py                       bubblewrap jail, guarded systemd services/scopes and vl.slice cap, bounded streaming
 candidate_exec.py             runs untrusted Python in a separate, sandboxed child process
 _candidate_child.py           the child: imports the candidate, calls it, writes outputs (stdlib only)
 leanmod.py                    Lean headers, module paths, import closure and rewriting, target theorems
@@ -178,7 +190,7 @@ adapters/python_eval.py       the Python check: candidate jail, judge jail, aggr
 | landrun | the Landlock sandbox of Comparator's builds and of the challenge pre-build | a probe that proves it enforces |
 | git | the trusted ref, its bytes, admission, worktrees for lanes and the common directory that owns them | `vl.trustedRef`; incoming classification; question and input digests; a lane's binding to its repository |
 | bubblewrap | namespaces, no network, cleared environment, mounts, overlays | the jail's mounts; lanes' copy-on-write build cache |
-| systemd | user scopes and a slice with memory and task limits | caps recorded in every receipt; an uncapped run says so; the slice cap is set for the session only (`systemctl --user set-property --runtime`) |
+| systemd | protected Lean services with AF_UNIX denied; resource scopes for other runs; slice memory/task limits | actual denial tested before protected Lean exec; caps recorded; other uncapped runs say so; slice cap is session-only (`systemctl --user set-property --runtime`) |
 
 What `vl` adds overall: the split between question and answer, receipts and derived status, statement probes and
 lints, a judge that never loads candidate code, lanes, incoming validation and fidelity reviews.

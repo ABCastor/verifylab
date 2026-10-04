@@ -132,7 +132,8 @@ def probe_gaps(receipt: dict) -> list[str]:
 
 def probe_notes(receipt: dict) -> list[str]:
     gaps = probe_gaps(receipt)
-    return [f"probes incomplete ({'; '.join(gaps)}): vacuity and triviality of the target were not ruled out"] \
+    return [f"probes incomplete ({'; '.join(gaps)}): this battery did not complete; no absence of vacuity or "
+            "triviality is established"] \
         if gaps else []
 
 

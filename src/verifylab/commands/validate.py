@@ -285,8 +285,8 @@ def _probes(ctx: Context, item, status, f: Findings) -> None:
         return
     gaps = probe_gaps(receipt)
     if gaps:
-        f.warn(item.path, f"probes incomplete ({'; '.join(gaps)}): vacuity and triviality of the target were not "
-                          "ruled out; run vl check --protected again")
+        f.warn(item.path, f"probes incomplete ({'; '.join(gaps)}): this battery did not complete; no absence of "
+                          "vacuity or triviality is established; run vl check --protected again")
     witnesses = _witnesses(item)
     _witness_requirement(item, receipt, witnesses, f)
     trivial = [(name, tactic) for name, tactic in probe_hits(receipt, "trivial_by") if name not in witnesses]

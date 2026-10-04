@@ -26,11 +26,13 @@ show what was gained and what was lost.
 - A longer version can be the better one. Conclude that when it is true.
 - Look for the canonical form: the natural generality, the right proof rather than the first one,
   and the links to neighbouring results (Tao's "canonicalization"). Generalize by concentration, not
-  dilution; prefer natural generality to finitary simplifications, where blueprint errors cluster.
+  dilution; compare the assumptions and boundary cases of a finitary simplification before trusting its reuse.
 - After an obligation closes, look back: which hypotheses were used, a second proof, the sibling
   questions the method reaches, where it stops. Write the method in the result's body: trigger (the
   goal's shape), move, example, fails-when.
 
 ## Record
-New or revised `result` items with targets, a `compare` review against the previous version
-(mode, what improved, what got worse, evidence), and the protected checks run by the coordinator.
+New or revised `result` items with targets and the protected checks run by the coordinator. A `compare` review
+records changes to mathematical strength, assumptions, reusable interfaces or disputed trade-offs (mode, what
+improved, what got worse, evidence). Routine source cleanup needs its diff and checks, not a separate comparison
+judgement when the mathematical contract is unchanged.

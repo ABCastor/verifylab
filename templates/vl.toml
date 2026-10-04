@@ -39,7 +39,7 @@ dir = "../.vl-lanes"
 max_parallel = 3
 
 [check]
-# Memory cap of one run, a check or a `vl lane exec` (systemd MemoryMax of its scope).
+# Memory cap of one run, a check or a `vl lane exec` (systemd MemoryMax of its unit).
 memory_max = "16G"
 # Statement probes after a pass: heartbeats per tactic attempt, in thousands as Lean's maxHeartbeats (at least 1000).
 # probe_heartbeats = 5000

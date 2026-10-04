@@ -147,6 +147,21 @@ admitted receipt, from those of the item as committed on the trusted ref (an ite
 makes it stale: a proof term only the worktree has never verifies); a receipt without `question_digest` is
 compared through the item blob `item_revision` names, and is stale when git lacks that blob.
 A receipt missing a required field, of the wrong shape, or whose `receipt_id` does not match is rejected.
+For a protected `pass`, validation also recomputes `inputs.digest` and requires normalized repository-relative
+input paths with hex sha256 digests, a full `inputs.trusted_commit`, and a `target` from that same commit whose
+path and hash match `inputs.trusted_files`. Lean passes require the target theorem list to match
+`checked.theorems`, coverage including the Lean kernel, an axiom list, toolchain/version, verifier tool paths and
+hashes, and recorded isolation. A trusted policy requiring nanoda also rejects missing kernel coverage.
+Python passes require the candidate in `inputs.files`, an entry identifier, a consistent case digest, positive
+case coverage with every case passed and no failure/judge error, interpreter/version and recorded isolation.
+
+Protected Lean execution additionally requires the pinned Comparator's outer AF_UNIX restriction: a systemd
+service applies `RestrictAddressFamilies=~AF_UNIX`, and a trusted helper observes socket denial before every
+jailed command. Receipts record the executed service command and isolation. Missing enforcement is
+`unsupported`; Python/exploratory resource caps retain their independent optional fallback.
+Incomplete historical passes remain files but fail validation and cannot verify a result; error, fail,
+unsupported and exploratory receipts can describe partial execution. These consistency checks do not
+authenticate execution: a trusted integrator can still admit a well-formed fabricated receipt.
 
 Tool identities and dependency traces are recorded for replay, not compared with the current machine when deriving
 staleness. A changed verifier binary or build cache therefore does not invalidate an old receipt automatically.
@@ -173,12 +188,22 @@ A JSON object written once, by `vl review`, as `research/reviews/<item>/<review_
 | `compare_with` | compare only: `id@<full revision>` |
 | `acknowledges` | fidelity only: `["trivial"]`, the target is meant to be closed by automation alone |
 | `target_path`, `target_sha256` | fidelity only: the `[lean] target` (else the `[python] evaluator`) and the sha256 of its content on the trusted ref |
+| `trusted_ref`, `trusted_commit` | new fidelity records: the ref and pinned commit read by the command; provenance, not reviewer authentication |
 | `meaning`, `meaning_digest` | fidelity only: what the reviewer read, from the trusted ref: `files` (the target or evaluator and, for Lean, every in-project module of its import closure, path to sha256), `theorems`, `witnesses`, `statement_sha256` (the item's claim text), `limits_sha256` and `assumptions_sha256` (the hex sha256 of the canonical JSON of the item's `limits` and `assumptions` lists), and `closure_error` when the closure could not be read; `meaning_digest` is `"sha256:"` + the hex sha256 of its canonical JSON |
 
 Effects, once admitted: a `retraction` makes the item `retracted`; a `correction` is shown first on every card; a
 `fidelity` review decides the item's fidelity; `compare` and `understanding` are shown only.
 
 A new fidelity review names the current trusted item revision, even if the worktree has proposed edits.
+New fidelity writes require `--expected-meaning-digest` equal to the `meaning_digest` obtained from an earlier
+`vl show ID --json` card before reading its files at `trust.commit`. A mismatch rejects the write. A fidelity
+`--dry-run` can discover the current basis without this flag; a supplied digest is still checked. The guard
+establishes context equality, not whether the caller read or understood it. Each command reads one pinned commit.
+For Lean, `meaning.semantic_environment` binds the normalized project/roots, toolchain, stable manifest package
+identities (excluding the top-level `packagesDir` cache placement), TOML package/root `leanOptions` propagated by
+the checker, and arbitrary `lakefile.lean` bytes conservatively. Missing files are recorded as `absent`; invalid
+structured files retain their raw hash and `semantic_environment_error`. Machine-local tools and caches are not
+part of this meaning basis. A Lean review lacking this environment remains readable but stale and must be renewed.
 An explicit `ID@rev` differing from that trusted revision is refused, including a title/body-only older revision:
 an item blob cannot reconstruct the historical target and definitions. Other review kinds can name old revisions.
 When a saved fidelity review's item blob is available, its bound statement, limits, assumptions, target and selected
@@ -194,7 +219,7 @@ the meaning there now (target, definitions closure, theorems, witnesses, claim t
 newest gives `faithful` or `disputed: <verdict>` (`created` compared as a time at full precision; among reviews of
 the same instant, a verdict other than `faithful` is the newer, then the path decides); `review stale: <what> changed since review` (target,
 definitions, theorems, claim, limits, assumptions) when only reviews of another meaning exist; `not reviewed` when
-none. The `title` and the body are explanatory text: no review binds them. Older reviews bind less, are marked on
+none. The `title` and the body are explanatory text: no review binds them. Older Python reviews bind less, are marked on
 the card with what they do not bind, and `vl validate` asks for a new one: a review whose `meaning` lacks
 `limits_sha256` and `assumptions_sha256` (written before reviews bound them) counts while the rest of its meaning
 is the meaning now and no admitted fidelity review of the item records them; a review without `meaning` (written before reviews recorded one) counts while its
@@ -207,6 +232,10 @@ reviewed` (or, for an older revision asked with `ID@rev`, `the revision asked fo
 card's header line.
 
 ## Derived status
+
+Relations are integrator assertions. `refutes` is not checked as a proof of negation, and `uses` does not propagate
+fidelity staleness. `answers` requires matching checker bindings when the question has them; a prose-only question
+has no machine-checked correspondence. The derived relationship labels below do not strengthen those assertions.
 
 Computed on every read, in this order; only well-formed receipts and reviews count. The kind and claim that choose
 the rule, and the relations of rules 2 and 5, are those of the item as committed on the trusted ref (the worktree's

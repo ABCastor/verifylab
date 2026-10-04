@@ -5,13 +5,17 @@ trusted Lean targets and Python evaluators, receipts of checks, and reviews. It 
 parallel, and for the people who integrate their work. No server, no UI, no database of record: one command line,
 seven agent skills, and a [record format](docs/SPEC.md) that is usable without `vl`.
 
-**The promise: nobody can make a result look verified without a check that anyone can re-run.** What a result
+**The promise: protected checks compare an answer with the committed question, and status distinguishes
+admitted evidence from exploratory or stale results.** What a result
 must prove is committed on a trusted ref; a check reads the question from there and only the answer from the
 worktree, runs in a jail, and writes a receipt bound to the digests of everything it read. Status is derived from
 receipts and reviews, never written. A receipt counts only once the integrator commits it on the trusted ref, and
 goes stale when any input changes.
 
 **The limit: a process of the same user can write any file `vl` reads**, the repository and its records included.
+The integrator must run `vl validate --incoming BRANCH` and generate protected receipts with `vl check`:
+incoming validation rejects candidate-written receipts and changes or deletions of existing evidence and reviews.
+The receipt's self-hash checks content integrity; it does not authenticate who ran a checker or prove execution.
 `vl` does not make cheating impossible; it provides evidence for detecting it: a receipt can be re-run from a clean
 clone when the checked inputs have been preserved in Git and the recorded tool environment can be reconstructed
 (by hand today, below; automatic deep replay is planned), the
@@ -31,8 +35,10 @@ whether the target actually represents the intended problem.
 
 - Linux, Python ≥ 3.11 (`vl` uses the standard library only), git.
 - bubblewrap (`bwrap`): every check, protected or exploratory, and every `vl lane exec` runs in its jail.
-- systemd user manager (optional): each run gets a memory cap and a task cap of its own; without one, runs are
-  uncapped, with a warning, and the receipt records `memory_cap: none`.
+- A working systemd user manager is required for protected Lean checks: an outer service enforces
+  Comparator's `RestrictAddressFamilies=~AF_UNIX`, with actual socket denial tested before each jailed command.
+  Without enforcement, the check stops as `unsupported`. For Python, exploratory checks and lane execution,
+  systemd supplies optional memory/task caps; without it those runs are uncapped, with a warning recorded.
 - For Lean: a toolchain installed with elan, and [Comparator](https://github.com/leanprover/comparator),
   lean4export and landrun (Landlock, Linux ≥ 5.13), and nanoda, the second kernel: protected checks need it
   while `[lean] external_kernels` is on (the default).
@@ -89,6 +95,10 @@ hypotheses, alternative roads, why each intermediate result matters, abandoned r
 check. Link records and read their current status with `vl show`; the plan is reasoning, not a second status store.
 Review the meaning of important intermediate targets as well as the final result. A faithful review is an
 attributed judgement, and a verified lemma is not by itself evidence that the research strategy will succeed.
+Read `vl show ID --json` before a fidelity review and retain its `meaning_digest` and `trust.commit`.
+Read the target and definitions at that commit, then write the review with
+`vl review ID --kind fidelity --expected-meaning-digest DIGEST --verdict faithful --author agent:referee --text "REASON"`.
+A changed meaning rejects the write; reread it before judging. The digest binds the context, not understanding.
 
 Select context for each task: relevant lemmas with their assumptions and limits, examples, unsuccessful attempts
 and source excerpts when useful. Different agents can receive different strategies or an invitation to find a
@@ -108,7 +118,9 @@ vl check nth-prime        # protected pass, exit 0; writes research/evidence/nth
 vl show nth-prime         # status pending-admission: the receipt is not on the trusted ref yet
 git add research && git commit -qm "admit the receipt"
 vl show nth-prime         # verified; fidelity: not reviewed
-vl review nth-prime --kind fidelity --verdict faithful --author human:you --text "CASES and judge test the n-th prime"
+vl show nth-prime --json > review-context.json  # retain this before reading the evaluator at trust.commit
+meaning_digest=$(python -c 'import json; print(json.load(open("review-context.json"))["items"][0]["meaning_digest"])')
+vl review nth-prime --kind fidelity --expected-meaning-digest "$meaning_digest" --verdict faithful --author human:you --text "CASES and judge test the n-th prime"
 git add research && git commit -qm "review the evaluator"
 cp -r ../verifylab/fixtures/python-planted/defects/wrong/experiments .   # a wrong candidate
 vl check nth-prime        # fail, exit 1, with the cases that did not pass
@@ -151,7 +163,7 @@ Exit 2 is always a usage or setup problem, never a verdict.
 | `vl show ID[@rev]` | the result card: corrections, limits, statement, status, proof, meaning, evidence, reviews, relations; `--impact`; `--brief` targets `--budget N` characters (default 8,000), naming a source's file, never inlining it; mandatory headers can exceed the budget, with a warning |
 | `vl find TEXT` | search items and the project's Lean declarations, local only; exit 1 when nothing matches |
 | `vl check ID` | run the item's checker and write a receipt; exit 0 pass, 1 fail, 3 error or unsupported; `--explore` never counts |
-| `vl review ID[@rev] --kind K` | record an immutable review: fidelity, compare, correction, retraction, understanding; `--author human:NAME` only with `--human-approved` or a confirmation at the terminal |
+| `vl review ID[@rev] --kind K` | record an immutable review: fidelity, compare, correction, retraction, understanding; new fidelity writes require `--expected-meaning-digest`; `--author human:NAME` only with `--human-approved` or a confirmation at the terminal |
 | `vl validate` | check records, references, receipts, reviews and targets, and warn on process state written into a record's prose and on target hypotheses its `assumptions` leave out; exit 1 on errors; `--incoming BRANCH` before a merge |
 | `vl lane new\|list\|exec\|close` | one git worktree per subagent, bound to its repository (sibling repositories never see each other's lanes); `exec` runs a command in the jail with the shared build cache read-only |
 
@@ -179,7 +191,11 @@ Derived on every read, from receipts and reviews committed on the trusted ref; n
 | `undetermined` | `refutes` or `answers` relations form a cycle |
 
 Next to the status, the card shows the meaning of the target as a separate fact: the fidelity review (docs/SPEC.md).
-A fidelity review binds what it read: the target and the definitions it imports, the theorems, and the item's
+`answers`, `refutes` and `uses` are admitted assertions about relationships, not proofs of implication or negation.
+For a checker-bound question, `answered` also requires the same target/theorems or evaluator/entry; a prose-only
+question has no such mechanical contract. A `refuted` label does not itself certify a proof of the negation.
+A fidelity review binds what it read: the target and the definitions it imports, the theorems, the stable Lean
+semantic environment, and the item's
 statement, limits and assumptions; editing any of them makes it stale. The title and body explain and bind nothing.
 Cards, briefs and `--json` show the statement, limits and assumptions as committed on the trusted ref, the text the
 status and fidelity hold for; a worktree that says otherwise is shown apart, labelled "uncommitted edit, not

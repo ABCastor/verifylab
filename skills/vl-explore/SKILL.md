@@ -8,11 +8,10 @@ description: Find literature, distant analogies, new hypotheses, conjectures and
 Exploration produces leads. A lead becomes a result only through `vl-prove` or `vl-experiment`.
 
 ## Sources
-- Record each source as an item (`kind = "source"`) with an exact `ref` (DOI, arXiv id, URL,
+- Record sources you rely on or expect to reuse as items (`kind = "source"`) with an exact `ref` (DOI, arXiv id, URL,
   file path, Lean declaration) and an honest `access`: `full-text-read`, `abstract-only`,
   `citation-only` or `secondary`. Citing a paper is not verifying its proposition. `vl find` searches
-  titles, statements, limits, assumptions and bodies, not `ref`: put the identifier in the title or body
-  too.
+  titles, statements, limits, assumptions, bodies and `ref`; no duplicate identifier in the prose is needed.
 - Resolve identifiers mechanically before you rely on them. Fabricated citations happen; a
   plausible theorem from a paper you have not read is a hypothesis.
 - Search what already exists before rebuilding it: the project (`vl find`: its items and the Lean
@@ -36,10 +35,11 @@ Write the analogy so it can fail:
   examples need unboundedly the variable; import one distant idea into an otherwise standard attack.
 - A road names its endpoint, its first checkable step and what would make you abandon it. Roads forward and
   backward meet only at a B with B ⇒ T, not merely T ⇒ B (`vl-prove` records reductions and obligations).
-- A new definition earns its place by making two results short corollaries or unlocking an obligation.
+- Test whether a new definition makes useful consequences easier or unlocks an obligation. Two short corollaries
+  can be a useful heuristic; an exploratory definition need not already have them.
 
 ## Hypotheses and conjectures
-- Each hypothesis or conjecture is an item with: the prediction, the assumptions, the evidence
+- Keep provisional hypotheses in a notebook; promote consequential or reusable ones to items with: the prediction, the assumptions, the evidence
   that would refute it, the cheapest informative test, and its cost.
 - Rank by expected information per cost, not by excitement. A rank is a calibratable prediction,
   never a verdict; if you want it kept, write it with its reason in the item's body.
@@ -48,5 +48,5 @@ Write the analogy so it can fail:
 - Novelty is judged by an agent that did not produce the result, after a literature search.
 
 ## Output
-New `source`, `conjecture` or `question` items, each linked (`cites`, `uses`, `answers`) to what
-motivated it; a short note of which leads you discarded and why.
+Consequential `source`, `conjecture` or `question` items, each linked (`cites`, `uses`, `answers`) to what
+motivated it; a short notebook account of provisional and discarded leads and why they were discarded.

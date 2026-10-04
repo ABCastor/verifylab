@@ -5,8 +5,7 @@ description: Help a human understand, study and contribute to the results of a V
 
 # vl-understand — the human side of the research
 
-A verified proof that no human understands is incomplete (Tao, "Mathematics in the age of AI").
-Machines can produce proofs faster than people can absorb them; this skill exists to close that gap.
+This skill helps a person digest a checked result: what it says, why it matters and how to use it.
 The human's attention is the scarcest resource: one question at a time, short first layer.
 
 ## 1. Explanations grounded in the lemmas
@@ -15,7 +14,7 @@ The human's attention is the scarcest resource: one question at a time, short fi
   (`vl show --brief`). Never present an unverified item as proved. List the supports in the explanation's
   `cites`: `vl validate` then reports an error when one is refuted or retracted and a warning when a result,
   conjecture or intuition is not verified; `[[...]]` links in the body are only checked to exist.
-- Present it in announced, numbered parts: what is established (status words); why it matters, in
+- Adapt the account to what the person needs. Useful parts include: what is established (status words); why it matters, in
   three sentences without notation; the hard step (where the real idea is: do not sand it off, do not
   dwell on trivia); what it does NOT give (the limits, the regime where it fails, the question it does
   not answer); what surprised us; at most one question. One idea per sentence; name things by role.
@@ -45,6 +44,8 @@ The human's attention is the scarcest resource: one question at a time, short fi
   for text they have not seen; a review you wrote is `agent:<you>`.
 
 ## 3. Study mode (Socratic)
+- Use this mode when the person wants to study or practice; a request for a direct explanation does not require
+  a prerequisite quiz or a study sequence.
 - Ask open questions, never multiple choice. One area at a time.
 - Start from at most three prerequisites, each with a one-line micro-check.
 - Ask for a prediction or a confidence level before revealing an answer or a number.

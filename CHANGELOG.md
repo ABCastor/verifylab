@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- Enforce the pinned Comparator's outer AF_UNIX restriction for protected Lean through a guarded systemd
+  service, preserving resource caps and whole-unit deadlines. Protected Lean now requires a working user manager.
+
+- Protected passing receipts require coherent target provenance, input digests, adapter coverage and environment;
+  incomplete historical passes remain on disk but cannot verify a result. Partial execution records stay readable.
+- New fidelity writes require `--expected-meaning-digest`; `show --json` exposes the pinned meaning basis and digest.
+  Lean reviews bind the stable toolchain, dependency manifest and relevant Lake configuration. Older Lean reviews
+  without that environment require renewal; cache placement alone does not invalidate them.
+- Source `ref` identifiers are searchable without duplicating them in prose; older derived indexes rebuild.
+- Document the integrator trust assumption, asserted relations and finite probe limits. Skills support scoped
+  blind read-back, provisional notebooks and appropriate empirical methods without per-edit review ceremony.
+
 ## 0.1.0 — 2026-10-04
 
 First public release, licensed under Apache-2.0. Bundled Comparator fixtures retain their upstream licence
