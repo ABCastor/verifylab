@@ -25,8 +25,12 @@ Skills: `vl-orient` (next move, fan-out, integration), `vl-explore`, `vl-prove`,
 
 The coordinator keeps the living research plan in the project's chosen Markdown home: goals, hypotheses, roads,
 why intermediate results matter, failed approaches and reasons to re-plan. Link records; read derived statuses
-from `vl`, rather than copying them into the plan. The harness selects context and launches agents: add relevant
-plan excerpts, dependency links, worked examples or source passages to the compact cards when the task needs them.
+from `vl`, rather than copying them into the plan. External agents and their harness choose rich, sparse or
+deliberately independent strategic context; the harness launches agents. Add relevant plan excerpts, dependency
+links, worked examples or source passages to compact cards when needed. Preserve reusable methods, conditions,
+missing bridges and informative failed
+attempts in short item/plan notes for later sessions; no strategic reading is mandatory. The seven `vl-` skills
+are scoped to this research project; toolkit/instruction fixes follow VerifyLab's CONTRIBUTING.md.
 
 Items are `research/items/<id>.md` with TOML front matter between `+++` lines, then free Markdown; unknown fields are rejected:
 

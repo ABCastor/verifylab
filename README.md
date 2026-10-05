@@ -86,8 +86,9 @@ reviews, evaluators) and `research/vl.toml`, records the branch as the trusted r
 ## How agents use it
 
 The seven skills guide coordination, exploration, proofs, experiments, improvement, human understanding and
-fidelity review. The external harness launches agents and chooses their context; `vl` supplies records, search,
-compact cards and isolated workspaces. A **lane** is a separate Git worktree: each agent edits its own copy,
+fidelity review. External agents and their harness choose tasks and context; the harness launches agents. `vl`
+supplies records, search, compact cards and isolated workspaces. A **lane** is a separate Git worktree: each agent
+edits its own copy,
 and the integrator reviews and merges useful changes into the trusted branch.
 
 For a hard problem, the coordinator maintains a living Markdown plan in the project's chosen location: goals,
@@ -100,11 +101,21 @@ Read the target and definitions at that commit, then write the review with
 `vl review ID --kind fidelity --expected-meaning-digest DIGEST --verdict faithful --author agent:referee --text "REASON"`.
 A changed meaning rejects the write; reread it before judging. The digest binds the context, not understanding.
 
-Select context for each task: relevant lemmas with their assumptions and limits, examples, unsuccessful attempts
-and source excerpts when useful. Different agents can receive different strategies or an invitation to find a
-new one. `vl show --brief` packs only the requested records; it does not retrieve their linked sources or include
-the full relations and reviews sections. Add the relevant plan and dependency links yourself, and open full cards
+Choose context for each task, including a deliberately small or independent start. Useful context includes
+lemmas with assumptions and limits, examples, unsuccessful attempts and source excerpts. Different agents can
+receive rich or sparse context, varied objectives/prompts or an invitation to find a new strategy; no amount of
+strategic reading or choice of model is prescribed. `vl show --brief` packs only the requested records; it does
+not retrieve linked sources or include the full relations and reviews sections. Add the relevant plan and dependency links yourself, and open full cards
 when needed. The default character budget is adjustable, not a limit on the agent's context window.
+
+After meaningful work, keep a dense note in the item or existing research plan: method or connection, conditions,
+result, remaining gap and useful next uses, with detail reachable by links. A short run retrospective can record
+which ideas helped and where attempts failed. These notes support later agents and the same agent after context
+compaction. Their interpretation and selection remain with the researcher.
+
+All seven skill names use the `vl-` prefix and apply to the current VerifyLab research project. `vl-improve`
+improves research results; toolkit/instruction fixes follow the contribution workflow. Optional appraisals can
+be prose in the body or notebook; a dedicated numeric rating/review interface is not implemented.
 
 ## First run (five minutes, no Lean needed)
 

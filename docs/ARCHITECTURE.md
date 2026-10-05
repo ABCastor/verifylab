@@ -10,7 +10,8 @@ a reconstructible tool environment; the integrator remains responsible for admis
 
 - No UI and no server: a command line over plain files in Git.
 - No database of record: `.vl-cache/index.sqlite` is a search cache, rebuilt when stale; records are files.
-- No scores: reviews are attributed judgements, never summed, averaged or voted.
+- No automatic scoring policy: reviews are attributed judgements. Optional contextual appraisals may be
+  recorded in prose; there is no dedicated numeric interface, score aggregation or vote-derived verification.
 - No agent launcher: `vl` never starts an agent; skills tell agents when to call it.
 - No model or harness rules: `vl` prescribes no model, harness or prompt.
 - No large artifacts: receipts keep digests and a log tail; builds stay in their caches.
@@ -23,9 +24,10 @@ a reconstructible tool environment; the integrator remains responsible for admis
   contract; a meaning review is an attributed judgement, including for important intermediate results.
 - Inherit existing tools and formats. Add a mechanism only for a demonstrated gap; repeated mechanical work
   belongs in commands, while research judgement belongs in skills.
-- Leave research strategy and context selection to the harness. A living Markdown plan records hypotheses,
-  alternatives, failed roads and reasons for the next step; agents may challenge that strategy while preserving
-  the question and evidence boundaries.
+- Leave research strategy and context selection to external agents and their harness. A living Markdown plan
+  records hypotheses, alternatives, failed roads and reasons for the next step; agents may challenge that strategy while preserving
+  the question and evidence boundaries. Strategic context can be rich, sparse or deliberately withheld for an
+  independent approach; isolation, fixed-question checking and snapshot-bound fidelity retain their contracts.
 - State present guarantees and their limits precisely. Planned deep replay is not a prerequisite for describing
   the shipped checks, and must never be described as implemented. Platform and same-user limits remain explicit.
 

@@ -9,7 +9,7 @@ This skill helps a person digest a checked result: what it says, why it matters 
 The human's attention is the scarcest resource: one question at a time, short first layer.
 
 ## 1. Explanations grounded in the lemmas
-- Build every explanation from items that exist: each mathematical step cites `[[id@rev]]` or a Lean
+- Ground claims about project results in the actual supports: each mathematical step cites `[[id@rev]]` or a Lean
   declaration, and says whether that support is verified, explored or only a conjecture
   (`vl show --brief`). Never present an unverified item as proved. List the supports in the explanation's
   `cites`: `vl validate` then reports an error when one is refuted or retracted and a warning when a result,
@@ -21,19 +21,22 @@ The human's attention is the scarcest resource: one question at a time, short fi
   Each formula: its question, every symbol named nearby, a reading in words, why it follows.
 - Place it: what it extends, what it contradicts, why it is worth (or not worth) the reader's time.
 - If you reconstruct how the idea could have been found, label it as a reconstruction.
-- Save it as an `explanation` item (`cites = [...]`); render PDF or HTML only when asked.
+- Save reusable accounts as `explanation` items (`cites = [...]`) within the project; each conversation need
+  not become a record. Label new derivations or illustrative analogies according to their actual support.
+  Render PDF or HTML only when asked.
 - A failed informal explanation does not invalidate a closed Lean proof, and a closed proof does
   not make an explanation correct. They are checked separately.
 
 ## 2. The human's intuitions
-- Ask for the person's own guess before you show yours or the agents' candidates.
+- When the person wants to contribute or study, invite their own guess before showing candidates; a direct
+  explanation does not require that step.
 - Record an idea, hunch or picture as an `intuition` item (`author = "human:<name>"`,
   `recorded_by = "agent:<you>"`): their words verbatim, then a restatement they confirm. In the body,
   in their words: where it comes from, whether they have met many cases like it with quick feedback,
-  and what would make them drop it. No confidence number.
-- An intuition is an attributed lead, never evidence, including the owner's. Derive one to three
-  consequences a cheap test can decide: `conjecture` or `question` items with
-  `cites = ["<intuition-id>"]`, each with its refuting evidence and cheapest test, or a road
+  and what would make them drop it. An optional appraisal is contextual opinion, not a verified probability.
+- An intuition is an attributed lead, never evidence, including the owner's. Develop useful consequences,
+  a bridge, definitions or microgoals when warranted: `conjecture` or `question` items with
+  `cites = ["<intuition-id>"]`, their gaps and possible next investigations or refuting evidence when known, or a road
   (`vl-explore`). Hand them on; when much rides on it, one lane tries to refute it.
 - Report back one line per consequence; `vl show <intuition-id>` lists what cites it, with statuses.
   A refuted hunch stays recorded.

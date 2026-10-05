@@ -17,10 +17,11 @@ description: Run exact computations, numerics or ML experiments for a VerifyLab 
 Keep an empirical result separate from any theorem it is meant to illustrate, and vice versa.
 
 ## Before spending
-- Do the cheapest discriminating calculation first (algebra, a ten-line exact script, a tiny
-  instance). Many expensive experiments are answered by it.
-- Pre-register in the item body: the prediction, what result would refute it, the comparison
-  rule, the budget. Then run.
+- Consider a cheap discriminating calculation (algebra, a ten-line exact script, a tiny instance) when it
+  addresses the question. Some investigations first need method development or study.
+- For a confirmatory comparison, pre-register the prediction, refuting outcome, comparison rule and budget
+  before running. For exploration, record purpose and conditions and distinguish hypotheses formed after
+  observing results; later confirmation needs fresh evidence.
 - Validate the measurer before trusting a gain: gold against gold scores perfect, a known-bad
   input scores bad, the metric moves the right way on a planted change. An optimizer exploits its
   evaluator. For a mathematically certified numerical claim, acceptance needs exact or certified interval
@@ -49,4 +50,6 @@ Keep an empirical result separate from any theorem it is meant to illustrate, an
   optional `files`. Then run `vl check`. The candidate never sees or edits the evaluator.
 - For ML runs, record a `result` with `claim = "empirical"` that points to the runner's own
   artifacts and states conditions and limits. VerifyLab does not run training; your project does.
+- Preserve a short reusable account of setup, observation, limits and next question, linked to artifacts;
+  speculative interpretations remain explicit.
 - Spending money, GPUs or remote services follows the project's own approval rules.

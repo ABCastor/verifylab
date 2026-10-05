@@ -89,4 +89,5 @@ requirement to perform every test on every small lemma.
 
 A review is a judgement, never a proof; clean context and blind read-back reduce conditioning but do not certify
 independence or understanding. On a hard case,
-referees running on different models can catch different things; each writes its own review, never a vote.
+referees running on different models can catch different things; each writes a reasoned fidelity review. Report optional strategic appraisals separately to the coordinator
+for the body/notebook until a dedicated interface exists; a rating cannot establish fidelity or proof validity.

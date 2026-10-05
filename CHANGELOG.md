@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Skills support agent-owned rich, sparse or independent context, varied research tasks and dense continuity
+  notes. Exploration heuristics remain optional; check/review boundaries retain their contracts. Scope research
+  improvement explicitly to the current research project.
+
 - Enforce the pinned Comparator's outer AF_UNIX restriction for protected Lean through a guarded systemd
   service, preserving resource caps and whole-unit deadlines. Protected Lean now requires a working user manager.
 
