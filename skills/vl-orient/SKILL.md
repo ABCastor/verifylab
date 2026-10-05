@@ -44,7 +44,7 @@ Typical moves and the skill that carries them:
 | A precise statement exists and needs a proof or a counterexample | `vl-prove` |
 | The claim is computational, numerical or empirical | `vl-experiment` |
 | Results exist but are long, narrow, duplicated or hard to reuse | `vl-improve` |
-| A human must understand, study or contribute an intuition | `vl-understand` |
+| A human wants to discuss goals, results, promising routes, experiments, intuitions or study | `vl-understand` |
 | A target's meaning needs an independent reader (a new target, before a merge request) | `vl-referee`, in a fresh agent |
 
 For a hard target, consider alternative roads when useful: forward from verified results, backward by
@@ -56,10 +56,13 @@ support you rely on is compromised. This is reasoning, not a state machine: a te
 before an expensive experiment, a counterexample may send you back to the literature.
 
 ## 2b. When to involve the human
-Their attention is the scarcest input. Involve them only for a decision they own (what the question means,
+A person may choose an ongoing scientific dialogue: use `vl-understand` to discuss goals, interpret results,
+develop intuitions and critique or refine experiments together. A stall is not required. During autonomous
+work, protect their attention: involve them for a decision they own (what the question means,
 the meaning of a target cited outside the project, which goal comes first, a road past its stop rule),
 knowledge only they hold (an intuition, the question's origin, what would make a result interesting), a
-surprise (a sign flip, a counterexample, an easy success on a hard target), or a stall. Before asking, write
+surprise (a sign flip, a counterexample, an easy success on a hard target), or a stall. Before interrupting
+autonomous work for a decision, write
 the two likeliest answers and the move each leads to; if it is the same move, state your assumption and go
 on. Never ask what records, a computation or `vl check` can settle. One open question per round, in role
 words (`vl-understand`); do not show the answer to a question they want to attack themselves. Sign

@@ -91,6 +91,12 @@ supplies records, search, compact cards and isolated workspaces. A **lane** is a
 edits its own copy,
 and the integrator reviews and merges useful changes into the trusted branch.
 
+A person can use `vl-understand` for scientific dialogue: clarify a goal, ask which results matter for it,
+contribute an intuition, or discuss and refine an experiment against recorded attempts. Explanations adapt
+to the person; evidence and attributed human/agent appraisals remain distinct. Useful contributions stay
+in the project's existing records or notebook for later readers. The interaction happens through the
+external agent; `vl` provides the local evidence and records.
+
 For a hard problem, the coordinator maintains a living Markdown plan in the project's chosen location: goals,
 hypotheses, alternative roads, why each intermediate result matters, abandoned roads and the next discriminating
 check. Link records and read their current status with `vl show`; the plan is reasoning, not a second status store.

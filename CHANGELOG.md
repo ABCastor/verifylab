@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Broaden `vl-understand` to scientific dialogue about goals, relevant results, intuitions and experiments,
+  with reciprocal critique, scoped failure evidence and distinct human/agent attribution. Coordinators
+  support user-requested dialogue as well as autonomous work.
+
 - Skills support agent-owned rich, sparse or independent context, varied research tasks and dense continuity
   notes. Exploration heuristics remain optional; check/review boundaries retain their contracts. Scope research
   improvement explicitly to the current research project.

@@ -1,12 +1,14 @@
 ---
 name: vl-understand
-description: Help a human understand, study and contribute to the results of a VerifyLab project — explanations grounded in the proved lemmas, recording the human's intuitions, and Socratic study questions. Use when the person asks to understand, study or explain a result, review a result for meaning, or shares an intuition or idea.
+description: Work with a human as a scientific partner in a VerifyLab project — explain goals and results, discuss promising routes, critique and refine experiments, preserve attributed intuitions and appraisals, or guide study. Use when the person asks what to investigate, what matters for a goal, wants an explanation or scientific discussion, or shares an idea.
 ---
 
 # vl-understand — the human side of the research
 
-This skill helps a person digest a checked result: what it says, why it matters and how to use it.
-The human's attention is the scarcest resource: one question at a time, short first layer.
+Help the person understand and shape the research: clarify goals, interpret results, develop ideas and examine
+possible next steps together. Ground the discussion in the project's actual evidence and name the open gaps.
+Adapt depth and notation to the person's request and demonstrated domain knowledge; expertise in one area does
+not imply expertise in another. Start with a short useful layer and ask at most one question at a time.
 
 ## 1. Explanations grounded in the lemmas
 - Ground claims about project results in the actual supports: each mathematical step cites `[[id@rev]]` or a Lean
@@ -31,9 +33,9 @@ The human's attention is the scarcest resource: one question at a time, short fi
 - When the person wants to contribute or study, invite their own guess before showing candidates; a direct
   explanation does not require that step.
 - Record an idea, hunch or picture as an `intuition` item (`author = "human:<name>"`,
-  `recorded_by = "agent:<you>"`): their words verbatim, then a restatement they confirm. In the body,
-  in their words: where it comes from, whether they have met many cases like it with quick feedback,
-  and what would make them drop it. An optional appraisal is contextual opinion, not a verified probability.
+  `recorded_by = "agent:<you>"`): preserve their words verbatim; attribute a restatement to them only if they
+  confirm it. Record the origin, relevant experience and reasons to reconsider when supplied; missing details
+  need not block recording a lead. An optional appraisal is contextual opinion, not a verified probability.
 - An intuition is an attributed lead, never evidence, including the owner's. Develop useful consequences,
   a bridge, definitions or microgoals when warranted: `conjecture` or `question` items with
   `cites = ["<intuition-id>"]`, their gaps and possible next investigations or refuting evidence when known, or a road
@@ -46,7 +48,31 @@ The human's attention is the scarcest resource: one question at a time, short fi
   they dictated or confirmed (`vl review --author human:<name> --human-approved`). Never write that flag
   for text they have not seen; a review you wrote is `agent:<you>`.
 
-## 3. Study mode (Socratic)
+## 3. Scientific dialogue
+- When asked what the project is trying to do, explain its current goal, what is established, the main open
+  gaps and why a proposed step might help. When asked what is interesting, state the goal or criterion used
+  and compare a few relevant candidates with their support, limitations and unresolved bridges. Scientific
+  importance and personal interest are judgments: give reasons and preserve meaningful disagreement.
+- Retrieve the plan, relevant full items, reviews, sources and prior attempts as needed. Brief cards omit generic
+  review lists and relation sections; `vl find` does not search review text or arbitrary notebooks. Follow links or use
+  file search for those. A search miss means no match in the searched scope, not that nobody tried it.
+- Treat a human proposal as a contribution to examine. Ask a useful clarification when needed, work out
+  consequences, look for supporting and contrary evidence, and propose a better formulation or experiment
+  when justified. If a related test exists, explain what was actually tested and its outcome; a failure under
+  those conditions does not refute every related hypothesis. Refer experimental design to `vl-experiment`
+  and new routes or bridges to `vl-explore` when needed, preserving the thread of the conversation.
+- Both human and agent may be mistaken. Revise your account when evidence warrants it, expose uncertainty,
+  and challenge an unsupported inference respectfully. An owner can choose priorities without that choice
+  establishing a scientific claim. Agreement, enthusiasm or repeated endorsements do not establish it either.
+- Preserve consequential contributions in the relevant item or existing plan/notebook: who proposed or judged
+  what, relative to which goal and item revision, why, and the supporting or conflicting links. Human words,
+  agent interpretations and agent-origin ideas/appraisals stay distinguishable. Do not infer a human rating
+  from their tone or label an agent paraphrase as approved human text. These notes inform later readers; they
+  do not change verification or fidelity, automatically rank work, or require another LLM evaluation. There
+  is currently no dedicated appraisal/rating command: use prose, not a fabricated review kind. Save reusable
+  insight and a changed direction rather than every conversational turn.
+
+## 4. Study mode (Socratic)
 - Use this mode when the person wants to study or practice; a request for a direct explanation does not require
   a prerequisite quiz or a study sequence.
 - Ask open questions, never multiple choice. One area at a time.
