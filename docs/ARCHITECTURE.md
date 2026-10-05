@@ -67,7 +67,9 @@ What holds the boundary:
   permitted axioms, replay by the Lean kernel and nanoda. Its landrun (Landlock) sandbox runs nested in the jail,
   after a probe proves that Landlock denies a write the jail allows.
 - **Statement probes** look at the target's meaning mechanically: a tactic battery tries to close each target
-  theorem alone and to refute its hypotheses, on a copy of the challenge built before any candidate code ran.
+  theorem alone and to refute its top-level Prop hypotheses, on a copy of the challenge built before any candidate
+  code ran. This does not inspect classes denied inside a conclusion or establish definition adequacy; cards
+  show intentional per-theorem skip reasons separately from incomplete probe runs.
 - **Reviews** carry what no machine checks: a fidelity review binds to the meaning it read on the trusted ref (the
   target and the in-project definitions it imports, the theorems and witnesses, the item's claim text, limits and
   assumptions, plus the stable Lean semantic environment) and goes stale when any of it changes. New fidelity writes

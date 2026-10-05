@@ -6,8 +6,9 @@ made of the challenge import, `import Lean`, optional tactic imports, the option
 For a target theorem `T` it never parses statement text: it reads `T`'s type from the environment.
 * Triviality: does a fixed battery of tactics close `T`'s type on its own?
 * Vacuity: open `T`'s binders (`forallTelescope`), keep its hypotheses, replace the conclusion by `False`;
-  does the battery prove that? Then no instance satisfies the hypotheses and `T` says nothing. Skipped when
-  `T` has no Prop hypothesis, or when its conclusion already is `False` (a negation, not a vacuous claim).
+  does the battery prove that? Then no instance satisfies the hypotheses. Whether this is the intended
+  impossibility claim needs review. This does not inspect solution classes denied inside a conclusion. Skipped when
+  `T` has no Prop hypothesis, or when its conclusion already is `False` (the contradiction is the target itself).
 A closing attempt counts only if no goal is left, the term has no `sorry` and no metavariable, the kernel
 accepts it, and it uses only the permitted axioms. Each attempt runs under its own heartbeat limit, which
 is deterministic; an attempt that hits it (or the recursion limit) counts as not closed and is listed in

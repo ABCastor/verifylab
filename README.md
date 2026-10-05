@@ -31,6 +31,10 @@ regardless of `P`: the protected Lean check rejects the changed statement. If `P
 trusted target, a proof can pass; statement probes warn about triviality, and a fidelity review must judge
 whether the target actually represents the intended problem.
 
+Statement probes can expose easy targets and contradictory premises. They do not establish whether a
+solution class inside a non-existence claim captures the intended problem. Cards show per-theorem
+premise-vacuity skip reasons; meaning review and suitably scoped test lemmas still matter.
+
 ## Requirements
 
 - Linux, Python ≥ 3.11 (`vl` uses the standard library only), git.
@@ -96,6 +100,8 @@ contribute an intuition, or discuss and refine an experiment against recorded at
 to the person; evidence and attributed human/agent appraisals remain distinct. Useful contributions stay
 in the project's existing records or notebook for later readers. The interaction happens through the
 external agent; `vl` provides the local evidence and records.
+The cost of reproducing a whole result does not settle the value of a bounded contribution. Assess reusable
+lemmas, simpler certificates or application bridges against the goal, with reasons for pursuing or stopping.
 
 For a hard problem, the coordinator maintains a living Markdown plan in the project's chosen location: goals,
 hypotheses, alternative roads, why each intermediate result matters, abandoned roads and the next discriminating

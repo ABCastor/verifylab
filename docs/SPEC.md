@@ -173,6 +173,10 @@ Statement probes (`checked.probes`, Lean, after a pass): per target theorem `tri
 closed the theorem alone, or null), `vacuous_by` (the tactic that derived `False` from its hypotheses, or null),
 `prop_hypotheses` (count; null when the probe gave no result), and optionally `limit_reached`, `vacuity_skipped`,
 `error`. `checked.probe_run` holds the battery, heartbeats, timeout and `problems`, or `skipped`.
+Vacuity tests inconsistency of top-level Prop hypotheses; it does not establish definition adequacy or inspect
+solution classes denied inside a conclusion. An intentional per-theorem `vacuity_skipped` reason is shown in
+full and brief text cards when that proof section is included; it is not a failed/incomplete run and does not
+change status. A witness establishes only its own stated instance, not coverage of other data or fidelity.
 
 ## Reviews
 

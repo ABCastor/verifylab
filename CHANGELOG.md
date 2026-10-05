@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Text and brief cards display recorded premise-vacuity skip reasons and the scope of that probe; skipped
+  premise tests no longer read as “not refuted”. Status and receipt formats are unchanged. Planted solution-class
+  and datum-pinning cases document the remaining semantic limits. Skills assess bounded contributions and
+  preserve scoped, source-linked notes before relying on them.
+
 - Broaden `vl-understand` to scientific dialogue about goals, relevant results, intuitions and experiments,
   with reciprocal critique, scoped failure evidence and distinct human/agent attribution. Coordinators
   support user-requested dialogue as well as autonomous work.

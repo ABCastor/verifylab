@@ -7,6 +7,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from verifylab.cli import main
 from review_helpers import meaning_args
 from verifylab.records import review_problems, seal_receipt, seal_review, sha256_hex, write_new_json
@@ -313,3 +315,40 @@ def test_only_the_newest_admitted_probes_count_for_undeclared_hypotheses(researc
     commit_all(root)
     assert any("the target has 1 hypothesis in VL.AddZero.main; state them in assumptions" in w
                for w in warnings(capsys))
+
+
+@pytest.mark.parametrize("hyps, reason", [(0, "no Prop hypothesis"), (1, "the conclusion is False")])
+def test_card_exposes_skipped_premise_vacuity_without_changing_status(
+        research_repo, monkeypatch, capsys, hyps, reason):
+    """A complete probe run can intentionally skip premise-vacuity; readers must see its scope.
+    Disabling the display guard hides the recorded reason while the protected pass is unchanged."""
+    from verifylab import render
+    root = research_repo
+    monkeypatch.chdir(root)
+    receipt(root, {"VL.AddZero.main": {**NULL, "prop_hypotheses": hyps, "vacuity_skipped": reason}})
+    commit_all(root)
+    marker = f"premise-vacuity skipped: {reason}"
+    for args in [("show", "add-zero"), ("show", "add-zero", "--brief", "--budget", "100000")]:
+        rc, out, _ = vl(capsys, *args)
+        assert rc == 0 and marker in out
+        assert "not refuted" not in out
+    card = json.loads(vl(capsys, "show", "add-zero", "--json")[1])["items"][0]
+    assert card["proof"]["probes"]["VL.AddZero.main"]["vacuity_skipped"] == reason
+    assert card["status"]["label"] == "verified"
+    assert not any("probes incomplete" in n for n in card["status"]["notes"])
+    original = render._probe_line
+    monkeypatch.setattr(render, "_probe_line", lambda name, entry, witnesses: original(
+        name, {k: v for k, v in entry.items() if k != "vacuity_skipped"}, witnesses))
+    assert marker not in vl(capsys, "show", "add-zero")[1]
+
+
+def test_premise_vacuity_scope_is_visible_even_when_no_probe_is_skipped(research_repo, monkeypatch, capsys):
+    root = research_repo
+    monkeypatch.chdir(root)
+    receipt(root, {"VL.AddZero.main": {**NULL, "prop_hypotheses": 1}})
+    commit_all(root)
+    out = vl(capsys, "show", "add-zero")[1]
+    assert "vacuity scope: inconsistency of top-level Prop hypotheses; definition adequacy needs review" in out
+    assert "1 Prop hypothesis, not refuted" in out
+    assert "premise-vacuity skipped" not in out
+    assert status(root).label == "verified"

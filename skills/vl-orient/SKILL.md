@@ -21,6 +21,8 @@ context. Cheap discriminating work is useful when it answers the question, not a
   gives direction and assumptions for a reader to examine; it does not replace understanding the problem.
   Prefer results that stand alone if the main attempt fails. A reduction to an open problem does not solve the
   target; it can still establish an equivalence, a barrier or a useful reusable implication. State which.
+  Keep condensed notes scoped to their observations, with conditions, unresolved bridges, dated or pinned
+  provenance and evidence a reader can reopen; a body link alone does not validate its contents.
 
 ## 1. Read the state (never from memory)
 - Before relying on saved supports or integrating changes, run `vl validate` and resolve or report relevant
@@ -36,6 +38,9 @@ context. Cheap discriminating work is useful when it answers the question, not a
 When useful, compare actions by the uncertainty they reduce, possible discriminating work, cost and reasons
 to stop or reconsider. Study, new definitions, speculative connections and formulation of microgoals may come
 before a check is known. Pick the next move and update the plan when evidence changes a hypothesis or road.
+When the whole result is beyond the available resources, assess bounded contributions against the goal:
+reusable lemmas, simpler certificates, weaker assumptions or application bridges. Cost of the whole effort
+alone does not close these roads; prioritize promising ones and give contribution-specific reasons for stopping.
 Typical moves and the skill that carries them:
 
 | Obstacle | Skill |

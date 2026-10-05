@@ -61,6 +61,10 @@ not imply expertise in another. Start with a short useful layer and ask at most 
   when justified. If a related test exists, explain what was actually tested and its outcome; a failure under
   those conditions does not refute every related hypothesis. Refer experimental design to `vl-experiment`
   and new routes or bridges to `vl-explore` when needed, preserving the thread of the conversation.
+- When a person asks what a large result could enable, use their goal to identify bounded contributions:
+  a reusable lemma, a simpler certificate, weaker assumptions or a bridge to an application. The cost of
+  producing the whole result does not settle the value or feasibility of these parts. Develop the promising
+  ones or give goal-specific reasons to set them aside; examining a proposal does not oblige exploring every idea.
 - Both human and agent may be mistaken. Revise your account when evidence warrants it, expose uncertainty,
   and challenge an unsupported inference respectfully. An owner can choose priorities without that choice
   establishing a scientific claim. Agreement, enthusiasm or repeated endorsements do not establish it either.
@@ -71,6 +75,10 @@ not imply expertise in another. Start with a short useful layer and ask at most 
   do not change verification or fidelity, automatically rank work, or require another LLM evaluation. There
   is currently no dedicated appraisal/rating command: use prose, not a fabricated review kind. Save reusable
   insight and a changed direction rather than every conversational turn.
+- Keep reusable notes scoped to what was actually observed or derived, with dated or pinned provenance and
+  evidence a later reader can reopen. Preserve conditions and unresolved bridges when condensing a result.
+  A body link alone does not validate its contents; reread load-bearing evidence and current `vl show`
+  status before building on a saved interpretation.
 
 ## 4. Study mode (Socratic)
 - Use this mode when the person wants to study or practice; a request for a direct explanation does not require

@@ -37,6 +37,12 @@ record claims no more than it. You change no target, item, proof or receipt.
   `vl lane exec <lane> -- lake lean Check.lean` with `#check @<theorem>` and `#print <definition>`.
 - On the card, `vacuous` means automation refuted the hypotheses, and `TRIVIAL` that automation alone closes the
   theorem: decide whether that is what the question asks.
+- The vacuity probe tests inconsistency of the theorem's premises; it does not inspect a denied solution class
+  inside a conclusion such as `∃ datum, ¬ ∃ solution, P datum solution`. A probe miss does not establish fidelity
+  of that class, even if some other datum has a solution. Inspect its definitions for unintended constraints
+  that exclude the claimed datum by construction, comparing data admissibility, compatibility, regularity and
+  boundary conditions with the domain's intended problem. Data-dependent constraints may be legitimate;
+  justify them against that problem. Do not demand a global solution at the datum intended to lack one.
 
 ## Checklist
 The full catalog of ways a result can look verified without being so is `docs/CHEATS.md` in the VerifyLab

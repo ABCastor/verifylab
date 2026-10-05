@@ -1,0 +1,11 @@
+description = "An impossible solution class under an existential negation. The explicit proof uses incompatible growth and flatness; premise-vacuity has no top-level Prop hypotheses to inspect."
+item = "double-even"
+stage = "trusted"
+expect = "pass"
+clean = ["VL.ImpossibleClass.main"]
+
+[lean]
+target = "research/targets/semantic-limits.lean"
+theorems = ["VL.ImpossibleClass.main"]
+proofs = { "VL.ImpossibleClass.main" = "⟨0, Fixture.SemanticLimits.impossible_empty 0⟩" }
+imports = ["Fixture.SemanticLimits"]

@@ -40,6 +40,9 @@ Develop a consequential analogy so its gaps can be examined; an initial note may
   backward meet only at a B with B ⇒ T, not merely T ⇒ B (`vl-prove` records reductions and obligations).
 - Test whether a new definition makes useful consequences easier or unlocks an obligation. Two short corollaries
   can be a useful heuristic; an exploratory definition need not already have them.
+- Assess bounded contributions against the owner's goal even when reproducing the whole result is too costly:
+  reusable lemmas, simpler certificates, weaker assumptions or application bridges may have their own value.
+  Give reasons specific to the proposed contribution when closing it; this does not require pursuing every lead.
 
 ## Hypotheses and conjectures
 - Keep provisional hypotheses in a notebook; promote consequential or reusable ones to items with the idea, assumptions, possible contribution and gaps.
@@ -57,3 +60,6 @@ Consequential `source`, `conjecture` or `question` items with citations or body 
 Use `uses` for actual dependencies and `answers` only when its question-binding contract is met; a short notebook account of provisional and discarded leads and their limits. Preserve the reusable
 connection or method, its prerequisites, the missing bridge and source pointers for later sessions; reading
 these notes remains task-dependent.
+Keep condensed observations scoped, with their conditions, unresolved bridges, dated or pinned provenance
+and evidence that can be reopened. Body links are pointers, not checks of their contents;
+before relying on a saved interpretation, reread its load-bearing evidence and derive current status with `vl show`.
