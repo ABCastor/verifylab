@@ -200,6 +200,30 @@ def test_comparator_service_reports_its_peak_memory(tmp_path):
 
 
 @bwrap
+@pytest.mark.parametrize("exit_code", [0, 7])
+def test_comparator_service_preserves_main_exit_while_reaping_children(tmp_path, exit_code):
+    """A surviving child must be killed without turning a completed command into a stop timeout."""
+    import uuid
+    marker = tmp_path / "survived"
+    code = ("import os, signal, sys, time\n"
+            "read, write = os.pipe()\n"
+            "if os.fork() == 0:\n"
+            "    os.close(read); signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            "    os.write(write, b'ready'); os.close(write)\n"
+            "    time.sleep(2); open(sys.argv[1], 'w').write('bad'); os._exit(0)\n"
+            "os.close(write); os.read(read, 5); os.close(read)\n"
+            "print('completed', flush=True); sys.exit(int(sys.argv[2]))\n")
+    # Exercise the outer service directly: this makes a child remain at main-process exit
+    # deterministically, without depending on bubblewrap's own teardown timing.
+    argv = jail.guarded_service([system_python(), "-c", code, str(marker), str(exit_code)],
+                                f"run-vl-reap-{uuid.uuid4().hex}.service", 5, "2G", None)
+    result = subprocess.run(argv, capture_output=True, timeout=10)
+    assert result.returncode == exit_code and result.stdout == b"completed\n", result
+    time.sleep(2.2)
+    assert not marker.exists()
+
+
+@bwrap
 def test_comparator_service_cannot_run_without_a_user_manager(tmp_path, monkeypatch):
     monkeypatch.setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent-vl-test-user-bus")
     result = jail.run(jail.Jail(workdir=tmp_path, deny_unix=True),

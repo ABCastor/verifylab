@@ -131,7 +131,8 @@ Lean (adapters/lean_comparator.py), with the phase names the receipt records in 
 Every step from preflight on runs in the jail under the same memory cap, with bounded output, and within what
 remains of the check's `--timeout`; a command that closes its output and keeps running is still killed at the
 deadline. Protected Lean deadlines stop the whole service, including descendants that closed output;
-`RuntimeMaxSec` bounds the service if its client disappears.
+`RuntimeMaxSec` bounds the service if its client disappears. Services kill remaining children immediately
+with SIGKILL and allow one second for reaping, preserving the main command's exit status without a zero-timeout race.
 
 Python (adapters/python_eval.py): read the candidate files from the worktree (no symbolic link on the way) and
 copy them; take the evaluator from the trusted commit, after checking that the trusted item binds this

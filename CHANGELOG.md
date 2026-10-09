@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Preserve a guarded command's exit status while reaping surviving children. Services kill children immediately
+  and allow one second for reaping, avoiding false stop-timeout failures after successful probe runs.
+
 - Text and brief cards display recorded premise-vacuity skip reasons and the scope of that probe; skipped
   premise tests no longer read as “not refuted”. Status and receipt formats are unchanged. Planted solution-class
   and datum-pinning cases document the remaining semantic limits. Skills assess bounded contributions and

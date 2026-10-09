@@ -183,7 +183,10 @@ def guarded_service(argv: Sequence[str], unit: str, timeout: float, memory_max: 
     return [systemd_run, "--user", "--wait", "--pipe", "--quiet", "--collect", "--service-type=exec",
             "--expand-environment=no", f"--unit={unit}", f"--slice={SLICE}",
             "-p", "RestrictAddressFamilies=~AF_UNIX", "-p", f"TasksMax={TASKS_MAX}",
-            "-p", f"RuntimeMaxSec={timeout}s", "-p", "TimeoutStopSec=0", "-p", "KillMode=control-group",
+            # Kill immediately, but let the manager reap children before classifying the service result.
+            # A zero stop timeout can turn a successful main exit into a spurious service timeout.
+            "-p", f"RuntimeMaxSec={timeout}s", "-p", "KillSignal=SIGKILL", "-p", "TimeoutStopSec=1s",
+            "-p", "KillMode=control-group",
             *caps, "--", sys.executable, "-I", "-S", "-c", _UNIX_GUARD, *argv]
 
 
