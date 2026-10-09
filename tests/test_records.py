@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import pytest
 
+from conftest import synthetic_receipt
+
 from verifylab.records import (
     RecordError, git_blob_sha, parse_item, receipt_problems, review_problems, seal_receipt, seal_review,
 )
@@ -44,10 +46,10 @@ def test_file_name_must_match_id():
 
 def _receipt(**over):
     fields = dict(item="t1", item_revision="a" * 40, adapter="lean-comparator", assurance="protected",
-                  verdict="pass", reasons=[], inputs={"digest": "d", "files": {"x": "y"}}, environment={},
+                  verdict="pass", reasons=[], inputs={"digest": "d", "files": {"x": "d" * 64}}, environment={},
                   checked={}, command=["vl"], started_at="t0", finished_at="t1", tool_version="vl 0.1.0")
     fields.update(over)
-    return seal_receipt(fields)
+    return synthetic_receipt(None, fields)
 
 
 def test_receipt_self_hash_detects_edit():
@@ -112,3 +114,86 @@ def test_a_lone_surrogate_is_a_record_problem_not_a_crash(research_repo, monkeyp
                     '"kind": "correction", "author": "agent:x", "text": "bad \\ud800 text", "created": "t"}')
     rc, captured = _show(research_repo, monkeypatch, capsys)
     assert rc == 0 and "not valid Unicode" in captured.out, captured.err
+
+
+@pytest.mark.parametrize("change, message", [
+    (lambda r: r.pop("target"), "target"),
+    (lambda r: r.update(checked={}), "checked.kernels"),
+    (lambda r: r.update(environment={}), "environment"),
+    (lambda r: r["inputs"].pop("trusted_files"), "trusted_files"),
+    (lambda r: r["inputs"].pop("trusted_commit"), "trusted_commit"),
+    (lambda r: r["inputs"].update(digest="sha256:" + "0" * 64), "inputs.digest"),
+    (lambda r: r["inputs"]["files"].update({"../candidate.lean": "a" * 64}), "repository-relative"),
+    (lambda r: r["inputs"]["files"].update(x="wrong"), "hex sha256"),
+    (lambda r: r["target"].update(sha256="f" * 64), "target identity"),
+    (lambda r: r["target"].update(commit="f" * 40), "trusted_commit"),
+    (lambda r: r["target"].update(source="worktree"), "trusted_commit"),
+    (lambda r: r["checked"].pop("kernels"), "checked.kernels"),
+    (lambda r: r["checked"].update(kernels=[]), "checked.kernels"),
+    (lambda r: r["checked"].update(theorems=["Other.main"]), "checked.theorems"),
+    (lambda r: r["environment"]["tools"]["comparator"].pop("sha256"), "tools.comparator"),
+    (lambda r: r.update(adapter="unknown"), "unknown adapter"),
+])
+def test_resealed_incomplete_or_incoherent_protected_pass_is_rejected(change, message):
+    receipt = _receipt()
+    assert receipt_problems(receipt) == []      # valid control
+    change(receipt)
+    assert any(message in p for p in receipt_problems(seal_receipt(receipt)))
+
+
+@pytest.mark.parametrize("verdict, assurance", [("fail", "protected"), ("error", "protected"),
+                                              ("unsupported", "protected"), ("pass", "exploratory")])
+def test_partial_nonverifying_receipts_remain_readable(verdict, assurance):
+    receipt = _receipt(verdict=verdict, assurance=assurance)
+    receipt.pop("target")
+    receipt["inputs"].pop("trusted_files")
+    receipt["inputs"].pop("trusted_commit")
+    receipt.update(environment={}, checked={})
+    assert receipt_problems(seal_receipt(receipt)) == []
+
+
+def _python_receipt():
+    receipt = _receipt()
+    candidate = next(iter(receipt["inputs"]["files"]))
+    evaluator = "research/evaluators/e.py"
+    receipt["adapter"] = "python-eval"
+    receipt["target"] = {"evaluator": evaluator, "sha256": "b" * 64, "source": "trusted-commit",
+                         "commit": receipt["inputs"]["trusted_commit"], "candidate": candidate, "entry": "solve",
+                         "cases_sha256": "c" * 64}
+    receipt["inputs"]["trusted_files"] = {evaluator: "b" * 64}
+    receipt["checked"] = {"cases": 2, "passed": 2, "failed": 0, "judge_errors": 0, "cases_sha256": "c" * 64}
+    receipt["environment"] = {"interpreter": "/usr/bin/python3", "python_version": "Python fixture",
+                              "isolation": {"candidate": "jail", "judge": "jail"}}
+    from verifylab.records import canonical_json, sha256_hex
+    basis = {key: receipt["inputs"][key] for key in ("files", "trusted_files")}
+    basis["target"] = receipt["target"]
+    receipt["inputs"]["digest"] = "sha256:" + sha256_hex(canonical_json(basis).encode())
+    return seal_receipt(receipt)
+
+
+@pytest.mark.parametrize("change, message", [
+    (lambda r: r["checked"].update(cases=0), "checked.cases"),
+    (lambda r: r["checked"].update(cases=True), "checked.cases"),
+    (lambda r: r["checked"].update(passed=1), "checked.cases"),
+    (lambda r: r["checked"].update(failed=1), "checked.cases"),
+    (lambda r: r["checked"].update(judge_errors=1), "checked.cases"),
+    (lambda r: r["checked"].update(cases_sha256="d" * 64), "checked.cases_sha256"),
+    (lambda r: r["target"].update(candidate="missing.py"), "target.candidate"),
+    (lambda r: r["target"].update(entry="not an identifier"), "target.entry"),
+    (lambda r: r["environment"].pop("interpreter"), "environment.interpreter"),
+])
+def test_protected_python_pass_requires_coherent_case_coverage(change, message):
+    receipt = _python_receipt()
+    assert receipt_problems(receipt) == []
+    change(receipt)
+    assert any(message in p for p in receipt_problems(seal_receipt(receipt)))
+
+
+def test_disabling_protected_pass_validation_lets_the_bad_digest_through(monkeypatch):
+    from verifylab import records
+    receipt = _receipt()
+    receipt["inputs"]["digest"] = "sha256:" + "0" * 64
+    receipt = seal_receipt(receipt)
+    assert any("inputs.digest" in p for p in receipt_problems(receipt))
+    monkeypatch.setattr(records, "_protected_pass_problems", lambda record: [])
+    assert receipt_problems(receipt) == []

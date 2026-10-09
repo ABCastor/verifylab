@@ -387,6 +387,13 @@ def test_receipt_fields_bind_candidate_and_trusted_inputs(lean_env, shared_cases
     assert "Fixture/Proofs.lean" not in outcome.trusted_files      # not in the target's closure
     assert outcome.target == {"path": target, "sha256": outcome.trusted_files[target],
                               "theorems": ["VL.DoubleEven.main"], "source": "trusted-commit", "commit": trusted}
+    from verifylab.commands.check import build_receipt
+    from verifylab.records import receipt_problems
+    from verifylab.repo import Repo
+    repo = Repo.open(root)
+    item = repo.load_item("double-even")
+    receipt = build_receipt(repo, item, item, "lean-comparator", "protected", trusted, outcome, "t0", "t1")
+    assert receipt_problems(json.loads(json.dumps(receipt))) == []
 
 
 @pytest.mark.lean
@@ -419,7 +426,9 @@ def test_receipt_records_isolation_and_where_the_time_went(lean_env, shared_case
     env = outcome.environment
     assert "Landlock" in env["isolation"]["landrun"] and env["isolation"]["memory_max"] == "12G"
     assert "Your solution is okay!" in outcome.log and "PROBE-DENIED" in outcome.log
-    assert outcome.command[:3] == [jail.program("systemd-run"), "--user", "--scope"]
+    assert outcome.command[:3] == [jail.program("systemd-run"), "--user", "--wait"]
+    assert "RestrictAddressFamilies=~AF_UNIX" in outcome.command
+    assert env["isolation"]["systemd_service"] and not env["isolation"]["systemd_scope"]
     assert jail.program("bwrap") in outcome.command
     assert "--slice=vl.slice" in outcome.command and env["isolation"]["slice"] == "vl.slice"
     # Phase timings: Comparator's lines arrive as printed (stdbuf -oL), Lake's per-module times, the scope's peak.

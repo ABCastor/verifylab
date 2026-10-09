@@ -2,7 +2,8 @@
 
 VerifyLab runs locally on Linux with Python 3.11 or later and Git. Protected Python checks need a system
 Python interpreter and bubblewrap. Protected Lean checks additionally need an installed Lean toolchain,
-Comparator, lean4export, landrun and nanoda. VerifyLab itself downloads nothing.
+Comparator, lean4export, landrun and nanoda, and a working systemd user manager with
+`RestrictAddressFamilies` support. VerifyLab itself downloads nothing.
 
 ## Install the command
 
@@ -29,10 +30,17 @@ Lane execution also requires bubblewrap's `--overlay` and `--overlay-src` option
 version 0.13.0. The verifier's Landlock enforcement is tested during every protected Lean check. A missing
 or ineffective jail stops a check; it never downgrades to unsandboxed execution.
 
-A working systemd user manager supplies per-run memory/task limits and the aggregate `vl.slice` memory
-limit. Without it, checks run without those caps and record the reason. `scripts/gate` uses the same
-availability rule. Machine-specific settings belong in the machine configuration, whose commented example
-is `templates/machine.toml`; no machine paths belong in a project's committed configuration.
+Protected Lean checks follow the [pinned Comparator isolation requirement](https://github.com/leanprover/comparator/blob/19e111e2141cf333c7daff0f64c5f24acc91dd2e/README.md):
+an outer systemd user service denies AF_UNIX sockets before bubblewrap starts. A trusted helper tests actual
+`EAFNOSUPPORT` before each jailed command; missing launchers, manager or enforcement stop the protected check
+with `error` or `unsupported`, never a passing verdict. A resource scope alone cannot enforce this property. A kernel version number does not
+replace the enforcement test.
+
+The manager also supplies per-run memory/task limits and the aggregate `vl.slice` memory limit. Python,
+exploratory checks and lane execution retain their optional resource-cap fallback: without a manager they
+run uncapped and record the reason. `scripts/gate` optionally caps its own test process, but protected Lean
+tests still require the enforced service. Machine-specific settings belong in the machine configuration,
+whose commented example is `templates/machine.toml`; no machine paths belong in committed project configuration.
 
 Ubuntu may restrict unprivileged user namespaces through AppArmor. The workflow disables that restriction
 only on its disposable runner. On a personal or shared machine, have the administrator provide an appropriate

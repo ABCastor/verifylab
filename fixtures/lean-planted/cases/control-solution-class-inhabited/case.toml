@@ -1,0 +1,11 @@
+description = "Compatible solution class: every datum has a solution, with a concrete witness function."
+item = "double-even"
+stage = "trusted"
+expect = "pass"
+clean = ["VL.InhabitedClass.main"]
+
+[lean]
+target = "research/targets/semantic-limits.lean"
+theorems = ["VL.InhabitedClass.main"]
+proofs = { "VL.InhabitedClass.main" = "Fixture.SemanticLimits.solution_exists" }
+imports = ["Fixture.SemanticLimits"]

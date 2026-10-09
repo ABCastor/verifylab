@@ -4,7 +4,8 @@ Comparator proves that a proof matches the trusted target; it cannot tell whethe
 A target written as `P ∨ True`, with hypotheses that never hold together, or over a definition that is
 constantly `True`, passes it. The probes look at the target's statement only (never at the proof), with the
 Lean metaprogram in `StatementProbe.lean`: a fixed tactic battery tries to close each target theorem's type
-(triviality) and to derive `False` from its hypotheses (vacuity).
+(triviality) and to derive `False` from its top-level Prop hypotheses (premise-vacuity). This does not
+inspect the adequacy of definitions or solution classes denied inside a conclusion.
 
 Where they run: after a pass, in the jail, on a SNAPSHOT of the challenge build taken before any candidate
 code was compiled. Comparator's solution build may write anything under the check project's `.lake` (its

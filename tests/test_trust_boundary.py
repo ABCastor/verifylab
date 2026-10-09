@@ -13,12 +13,13 @@ from pathlib import Path
 import pytest
 
 from verifylab.cli import main
+from review_helpers import meaning_args
 from verifylab.gitref import GitError
 from verifylab.records import seal_receipt, seal_review, sha256_hex, write_new_json
 from verifylab.render import Context
 from verifylab.repo import Repo
 
-from conftest import commit_all, git, item_question, write_item
+from conftest import synthetic_receipt, commit_all, git, item_question, write_item
 
 LEAN = "Fixture/Basic.lean"
 
@@ -26,7 +27,7 @@ LEAN = "Fixture/Basic.lean"
 def receipt(root: Path, item_id: str = "add-zero", verdict: str = "pass", finished: str = "2026-10-01T10:00:00+00:00",
             checked: dict | None = None, **extra) -> Path:
     exists = (root / "research" / "items" / f"{item_id}.md").is_file()
-    data = seal_receipt(dict(
+    data = synthetic_receipt(root, dict(
         item=item_id, item_revision="a" * 40,
         question_digest=item_question(root, item_id) if exists else "sha256:" + "0" * 64,
         adapter="lean-comparator", assurance="protected", verdict=verdict,
@@ -470,7 +471,7 @@ def test_a_pass_checked_under_an_overridden_machine_policy_says_so(research_repo
     st = status(root)
     assert st.label == "verified" and not any("machine policy" in n for n in st.notes)   # control
     git(root, "rm", "-q", str(path))
-    data = seal_receipt(dict(
+    data = synthetic_receipt(root, dict(
         item="add-zero", item_revision="a" * 40, question_digest=item_question(root, "add-zero"),
         adapter="lean-comparator", assurance="protected", verdict="pass", reasons=[],
         inputs={"digest": "d", "files": {LEAN: sha256_hex((root / LEAN).read_bytes())}},
@@ -701,7 +702,7 @@ def _with_target(root: Path) -> None:
 def _reviewed(root: Path, monkeypatch, capsys) -> None:
     _with_target(root)
     monkeypatch.chdir(root)
-    assert main(["review", "add-zero", "--kind", "fidelity", "--verdict", "faithful", "--author", "human:ref",
+    assert main(["review", "add-zero", "--kind", "fidelity", *meaning_args(), "--verdict", "faithful", "--author", "human:ref",
                  "--human-approved", "--text", "double is doubling; main says so"]) == 0
     capsys.readouterr()
     commit_all(root, "admit the review")
@@ -802,7 +803,7 @@ def test_a_review_recorded_before_limits_were_bound_counts_marked_and_validate_a
     assert _fidelity(root).label == "review stale: claim changed since review"
     _replace(item, "Something else.", "For every n, n + 0 = n.")
     commit_all(root, "restore the claim")
-    assert main(["review", "add-zero", "--kind", "fidelity", "--verdict", "too-weak", "--author", "agent:ref",
+    assert main(["review", "add-zero", "--kind", "fidelity", *meaning_args(), "--verdict", "too-weak", "--author", "agent:ref",
                  "--text", "without the limit the record claims more than main says"]) == 0
     commit_all(root, "a review that binds the limits")
     state = _fidelity(root)
@@ -811,7 +812,7 @@ def test_a_review_recorded_before_limits_were_bound_counts_marked_and_validate_a
     commit_all(root, "edit the limits under the dispute")
     # The newer review is stale; the older one, which never bound the limits, does not come back as faithful.
     assert _fidelity(root).label == "review stale: limits changed since review"
-    assert main(["review", "add-zero", "--kind", "fidelity", "--verdict", "faithful", "--author", "agent:ref",
+    assert main(["review", "add-zero", "--kind", "fidelity", *meaning_args(), "--verdict", "faithful", "--author", "agent:ref",
                  "--text", "main says n + 0 = n; the limit is honest"]) == 0
     commit_all(root, "review the new limits")
     state = _fidelity(root)
@@ -823,7 +824,7 @@ def test_a_review_recorded_before_limits_were_bound_counts_marked_and_validate_a
 # CHEATS R21: an adverse fidelity review is never lost to a tie --------------------------------------------------------
 
 def _fidelity_review(capsys, verdict: str, text: str, dry_run: bool = False) -> dict:
-    assert main(["review", "add-zero", "--kind", "fidelity", "--verdict", verdict, "--author", "agent:ref",
+    assert main(["review", "add-zero", "--kind", "fidelity", *meaning_args(), "--verdict", verdict, "--author", "agent:ref",
                  "--text", text, "--json", *(["--dry-run"] if dry_run else [])]) == 0
     return json.loads(capsys.readouterr().out)["review"]
 
@@ -957,7 +958,7 @@ def test_a_renewed_review_of_a_changed_target_is_not_a_duplicate(research_repo, 
     _reviewed(root, monkeypatch, capsys)
     _replace(root / "research/targets/t.lean", "2 * n", "n + n")
     commit_all(root, "change the target")
-    assert main(["review", "add-zero", "--kind", "fidelity", "--verdict", "faithful", "--author", "human:ref",
+    assert main(["review", "add-zero", "--kind", "fidelity", *meaning_args(), "--verdict", "faithful", "--author", "human:ref",
                  "--human-approved", "--text", "double is doubling; main says so"]) == 0, capsys.readouterr().err
 
 
@@ -977,18 +978,18 @@ def _review_without_meaning(root: Path) -> None:
     write_new_json(root / "research" / "reviews" / "add-zero" / f"{older['review_id'][:16]}.json", older)
 
 
-def test_an_older_review_without_a_meaning_binds_the_target_only_and_says_so(research_repo, monkeypatch, capsys):
+def test_an_older_lean_review_without_a_meaning_requires_environment_renewal(research_repo, monkeypatch, capsys):
     root = research_repo
     _with_target(root)
     _review_without_meaning(root)
     (root / "Fixture" / "Defs.lean").write_text("def double (n : Nat) : Nat := n * n\n")
     commit_all(root, "an older review, and a changed definition")
     state = _fidelity(root)
-    assert state.label == "faithful" and state.legacy and state.by == "human:old"
-    assert state.unbound == ("definitions", "theorems", "claim", "limits", "assumptions")
+    assert state.label == "review stale: semantic environment not bound; review again"
+    assert state.unbound == ("semantic environment",)
     monkeypatch.chdir(root)
     assert main(["show", "add-zero"]) == 0
-    assert "binds the target file only" in capsys.readouterr().out
+    assert "semantic environment not bound; review again" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("change, what", [(change, what) for change, what in CHANGES if what != "target"])
@@ -1001,7 +1002,7 @@ def test_an_older_review_without_a_meaning_never_comes_back_once_a_newer_review_
     _review_without_meaning(root)
     commit_all(root, "an older review")
     monkeypatch.chdir(root)
-    assert main(["review", "add-zero", "--kind", "fidelity", "--verdict", "faithful", "--author", "agent:ref",
+    assert main(["review", "add-zero", "--kind", "fidelity", *meaning_args(), "--verdict", "faithful", "--author", "agent:ref",
                  "--text", "double is doubling; main says so"]) == 0
     commit_all(root, "a newer review that binds the meaning")
     assert _fidelity(root).label == "faithful" and not _fidelity(root).legacy

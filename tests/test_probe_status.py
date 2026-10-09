@@ -7,12 +7,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from verifylab.cli import main
+from review_helpers import meaning_args
 from verifylab.records import review_problems, seal_receipt, seal_review, sha256_hex, write_new_json
 from verifylab.repo import Repo
 from verifylab.status import derive
 
-from conftest import commit_all, item_question
+from conftest import synthetic_receipt, commit_all, item_question
 
 TARGET = "research/targets/add-zero.lean"
 NULL = {"trivial_by": None, "vacuous_by": None, "prop_hypotheses": 0}
@@ -43,7 +46,7 @@ def receipt(root: Path, probes: dict | None, finished: str = "t1", assurance: st
         checked["lints"] = lints
     if probes is not None:
         checked.update(probes=probes, probe_run={"battery": ["simp"], "heartbeats_per_attempt": 5000, "problems": []})
-    data = seal_receipt(dict(
+    data = synthetic_receipt(root, dict(
         item="add-zero", item_revision="a" * 40, question_digest=item_question(root, "add-zero"),
         adapter="lean-comparator", assurance=assurance, verdict="pass",
         reasons=[], inputs={"digest": "d", "files": {lean: sha256_hex((root / lean).read_bytes())}},
@@ -106,11 +109,11 @@ def test_triviality_warns_until_a_fidelity_review_of_the_current_target_acknowle
     assert any(message in w for w in warnings(capsys))
 
     # A faithful review that does not acknowledge the triviality silences the fidelity warning only.
-    assert vl(capsys, "review", "add-zero", "--kind", "fidelity", "--verdict", "faithful", "--author",
+    assert vl(capsys, "review", "add-zero", "--kind", "fidelity", *meaning_args(), "--verdict", "faithful", "--author",
               "agent:referee", "--text", "States n + 0 = n.")[0] == 0
     commit_all(root)
     assert any(message in w for w in warnings(capsys))
-    rc, out, _ = vl(capsys, "review", "add-zero", "--kind", "fidelity", "--verdict", "faithful", "--author",
+    rc, out, _ = vl(capsys, "review", "add-zero", "--kind", "fidelity", *meaning_args(), "--verdict", "faithful", "--author",
                     "agent:referee", "--acknowledge", "trivial", "--text", "A definitional fact; trivial by design.",
                     "--json")
     assert rc == 0 and json.loads(out)["review"]["acknowledges"] == ["trivial"]
@@ -148,7 +151,7 @@ def test_card_states_proof_and_meaning_separately(research_repo, monkeypatch, ca
              "MEANING", "  fidelity: not reviewed", "EVIDENCE"]
     positions = [out.index(marker) for marker in order]
     assert positions == sorted(positions), out
-    vl(capsys, "review", "add-zero", "--kind", "fidelity", "--verdict", "faithful", "--author", "agent:referee",
+    vl(capsys, "review", "add-zero", "--kind", "fidelity", *meaning_args(), "--verdict", "faithful", "--author", "agent:referee",
        "--acknowledge", "trivial", "--text", "Trivial by design.")
     commit_all(root)
     out = vl(capsys, "show", "add-zero")[1]
@@ -312,3 +315,40 @@ def test_only_the_newest_admitted_probes_count_for_undeclared_hypotheses(researc
     commit_all(root)
     assert any("the target has 1 hypothesis in VL.AddZero.main; state them in assumptions" in w
                for w in warnings(capsys))
+
+
+@pytest.mark.parametrize("hyps, reason", [(0, "no Prop hypothesis"), (1, "the conclusion is False")])
+def test_card_exposes_skipped_premise_vacuity_without_changing_status(
+        research_repo, monkeypatch, capsys, hyps, reason):
+    """A complete probe run can intentionally skip premise-vacuity; readers must see its scope.
+    Disabling the display guard hides the recorded reason while the protected pass is unchanged."""
+    from verifylab import render
+    root = research_repo
+    monkeypatch.chdir(root)
+    receipt(root, {"VL.AddZero.main": {**NULL, "prop_hypotheses": hyps, "vacuity_skipped": reason}})
+    commit_all(root)
+    marker = f"premise-vacuity skipped: {reason}"
+    for args in [("show", "add-zero"), ("show", "add-zero", "--brief", "--budget", "100000")]:
+        rc, out, _ = vl(capsys, *args)
+        assert rc == 0 and marker in out
+        assert "not refuted" not in out
+    card = json.loads(vl(capsys, "show", "add-zero", "--json")[1])["items"][0]
+    assert card["proof"]["probes"]["VL.AddZero.main"]["vacuity_skipped"] == reason
+    assert card["status"]["label"] == "verified"
+    assert not any("probes incomplete" in n for n in card["status"]["notes"])
+    original = render._probe_line
+    monkeypatch.setattr(render, "_probe_line", lambda name, entry, witnesses: original(
+        name, {k: v for k, v in entry.items() if k != "vacuity_skipped"}, witnesses))
+    assert marker not in vl(capsys, "show", "add-zero")[1]
+
+
+def test_premise_vacuity_scope_is_visible_even_when_no_probe_is_skipped(research_repo, monkeypatch, capsys):
+    root = research_repo
+    monkeypatch.chdir(root)
+    receipt(root, {"VL.AddZero.main": {**NULL, "prop_hypotheses": 1}})
+    commit_all(root)
+    out = vl(capsys, "show", "add-zero")[1]
+    assert "vacuity scope: inconsistency of top-level Prop hypotheses; definition adequacy needs review" in out
+    assert "1 Prop hypothesis, not refuted" in out
+    assert "premise-vacuity skipped" not in out
+    assert status(root).label == "verified"

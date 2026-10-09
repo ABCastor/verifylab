@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import socket
+import time
 import subprocess
 from pathlib import Path
 
@@ -128,3 +129,155 @@ def test_a_line_without_an_end_is_cut(tmp_path: Path):
     assert run.returncode == 0
     [(_, where, line)] = run.lines
     assert where == "stdout" and len(line) < 64 * 2**10 and line.endswith("[line cut by vl]"), len(line)
+
+
+@bwrap
+def test_comparator_service_denies_unix_sockets_in_the_same_child(tmp_path: Path):
+    """The benign operation succeeds in bwrap alone; the inherited upstream guard denies it."""
+    from dataclasses import replace
+    code = ("import errno, socket\ntry:\n    socket.socket(socket.AF_UNIX); print('allowed')\n"
+            "except OSError as exc:\n    print('denied', exc.errno)\n")
+    box = jail.Jail(workdir=tmp_path)
+    control = jail.run(box, [system_python(), "-c", code], timeout=30)
+    assert control.returncode == 0 and control.stdout == b"allowed\n", control.stderr
+    guarded = jail.stream(replace(box, deny_unix=True), [system_python(), "-c", code], timeout=30,
+                          memory_max="2G")
+    assert guarded.returncode == 0 and guarded.stdout == b"denied 97\n", guarded.stderr
+    assert "RestrictAddressFamilies=~AF_UNIX" in guarded.argv and "--scope" not in guarded.argv
+    assert "MemoryMax=2G" in guarded.argv and "MemorySwapMax=0" in guarded.argv
+    assert f"TasksMax={jail.TASKS_MAX}" in guarded.argv and f"--slice={jail.SLICE}" in guarded.argv
+
+
+def test_comparator_service_refuses_missing_manager_without_executing_code(tmp_path, monkeypatch):
+    box = jail.Jail(workdir=tmp_path, deny_unix=True)
+    launcher = jail.program
+    monkeypatch.setattr(jail, "program", lambda name: None if name == "systemd-run" else launcher(name))
+    with pytest.raises(RuntimeError, match="requires systemd-run"):
+        jail.run(box, ["/bin/sh", "-c", "touch should-not-exist"], timeout=5)
+    assert not (tmp_path / "should-not-exist").exists()
+
+
+@bwrap
+def test_comparator_service_refuses_unenforced_restriction(tmp_path, monkeypatch):
+    """Dropping exactly the upstream property prevents the trusted helper from executing bwrap."""
+    service = jail.guarded_service
+    def unguarded(*args):
+        argv = service(*args)
+        index = argv.index("RestrictAddressFamilies=~AF_UNIX")
+        del argv[index - 1:index + 1]
+        return argv
+    monkeypatch.setattr(jail, "guarded_service", unguarded)
+    with pytest.raises(RuntimeError, match="AF_UNIX restriction is not enforced"):
+        jail.run(jail.Jail(workdir=tmp_path, deny_unix=True),
+                 ["/bin/sh", "-c", "touch should-not-exist"], timeout=5)
+    assert not (tmp_path / "should-not-exist").exists()
+
+
+@bwrap
+@pytest.mark.parametrize("close_output", [False, True])
+def test_comparator_service_deadline_kills_children_and_unloads_unit(tmp_path, close_output):
+    code = ("import os, time\n"
+            "print('started', flush=True)\n"
+            + ("os.close(1); os.close(2)\n" if close_output else "")
+            + "if os.fork() == 0:\n    time.sleep(3); open('survived', 'w').write('bad'); os._exit(0)\n"
+            + "time.sleep(30)\n")
+    run = jail.stream(jail.Jail(workdir=tmp_path, deny_unix=True), [system_python(), "-c", code], timeout=1)
+    assert run.returncode is None and run.stdout == b"started\n" and run.seconds < 5, run
+    unit = next(arg.split('=', 1)[1] for arg in run.argv if arg.startswith('--unit='))
+    state = subprocess.run([jail.program("systemctl"), "--user", "is-active", unit], capture_output=True)
+    assert state.returncode != 0, state.stdout
+    time.sleep(3.2)
+    assert not (tmp_path / "survived").exists()
+
+
+@bwrap
+def test_comparator_service_reports_its_peak_memory(tmp_path):
+    code = "import time; b = bytearray(100 * 2**20); time.sleep(1)"
+    run = jail.stream(jail.Jail(workdir=tmp_path, deny_unix=True), [system_python(), "-c", code],
+                      timeout=10, memory_max="2G")
+    assert run.returncode == 0, run.stderr
+    assert run.memory_peak is not None and 100 * 2**20 <= run.memory_peak < 2 * 2**30
+
+
+@bwrap
+@pytest.mark.parametrize("exit_code", [0, 7])
+def test_comparator_service_preserves_main_exit_while_reaping_children(tmp_path, exit_code):
+    """A surviving child must be killed without turning a completed command into a stop timeout."""
+    import uuid
+    marker = tmp_path / "survived"
+    code = ("import os, signal, sys, time\n"
+            "read, write = os.pipe()\n"
+            "if os.fork() == 0:\n"
+            "    os.close(read); signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            "    os.write(write, b'ready'); os.close(write)\n"
+            "    time.sleep(2); open(sys.argv[1], 'w').write('bad'); os._exit(0)\n"
+            "os.close(write); os.read(read, 5); os.close(read)\n"
+            "print('completed', flush=True); sys.exit(int(sys.argv[2]))\n")
+    # Exercise the outer service directly: this makes a child remain at main-process exit
+    # deterministically, without depending on bubblewrap's own teardown timing.
+    argv = jail.guarded_service([system_python(), "-c", code, str(marker), str(exit_code)],
+                                f"run-vl-reap-{uuid.uuid4().hex}.service", 5, "2G", None)
+    result = subprocess.run(argv, capture_output=True, timeout=10)
+    assert result.returncode == exit_code and result.stdout == b"completed\n", result
+    time.sleep(2.2)
+    assert not marker.exists()
+
+
+@bwrap
+def test_comparator_service_cannot_run_without_a_user_manager(tmp_path, monkeypatch):
+    monkeypatch.setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent-vl-test-user-bus")
+    result = jail.run(jail.Jail(workdir=tmp_path, deny_unix=True),
+                      ["/bin/sh", "-c", "touch should-not-exist"], timeout=5)
+    assert result.returncode != 0 and not (tmp_path / "should-not-exist").exists()
+
+
+@bwrap
+@pytest.mark.parametrize("close_output", [False, True])
+@pytest.mark.parametrize("stop_error", [OSError("injected stop failure"),
+                                         subprocess.TimeoutExpired(["systemctl"], 5),
+                                         RuntimeError("injected nonzero stop status")])
+def test_comparator_stop_failure_keeps_timeout_and_reaps_client(tmp_path, monkeypatch, close_output, stop_error):
+    """A failed service stop leaves cleanup unconfirmed; the client and its pipes are still released."""
+    popen, service, stop = subprocess.Popen, jail.guarded_service, jail._stop_service
+    clients = []
+    def tracked_popen(argv, *args, **kwargs):
+        proc = popen(argv, *args, **kwargs)
+        if argv[0] == jail.program("systemd-run") and "--wait" in argv:
+            clients.append(proc)
+        return proc
+    def longer_service(*args):
+        argv = service(*args)
+        # Keep the service alive long enough to demonstrate that client cleanup does not establish child cleanup.
+        index = next(i for i, arg in enumerate(argv) if arg.startswith("RuntimeMaxSec="))
+        argv[index] = "RuntimeMaxSec=5s"
+        return argv
+    def failed_stop(unit):
+        raise stop_error
+    monkeypatch.setattr(subprocess, "Popen", tracked_popen)
+    monkeypatch.setattr(jail, "guarded_service", longer_service)
+    monkeypatch.setattr(jail, "_stop_service", failed_stop)
+    code = ("import os, time; print('started', flush=True); "
+            + ("os.close(1); os.close(2); " if close_output else "") + "time.sleep(30)")
+    unit = None
+    try:
+        run = jail.stream(jail.Jail(workdir=tmp_path, deny_unix=True), [system_python(), "-c", code], timeout=1)
+        unit = next(arg.split("=", 1)[1] for arg in run.argv if arg.startswith("--unit="))
+        assert run.returncode is None and run.stdout == b"started\n", run
+        assert len(clients) == 1 and clients[0].poll() is not None
+        assert clients[0].stdout.closed and clients[0].stderr.closed
+        assert b"service stop failed" in run.stderr and b"immediate service cleanup is unconfirmed" in run.stderr
+        assert b"RuntimeMaxSec remains the fallback" in run.stderr and unit.encode() in run.stderr
+        assert any(name == "vl" and "service stop failed" in line for _, name, line in run.lines)
+        state = subprocess.run([jail.program("systemctl"), "--user", "is-active", unit], capture_output=True)
+        assert state.returncode == 0, state.stdout
+    finally:
+        if unit:
+            stop(unit)
+
+
+
+def test_service_stop_nonzero_status_is_an_error(monkeypatch):
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs:
+                        subprocess.CompletedProcess(args[0], 1, "", "injected manager refusal"))
+    with pytest.raises(RuntimeError, match="injected manager refusal"):
+        jail._stop_service("run-vl-test.service")

@@ -1,0 +1,12 @@
+description = "A global zero-datum witness coexists with exclusion of datum 1. A witness certifies its stated instance and does not certify solution-class fidelity for other data."
+item = "double-even"
+stage = "trusted"
+expect = "pass"
+clean = ["VL.PinnedClass.main", "VL.PinnedClass.witness", "VL.PinnedClass.excludedDatum"]
+
+[lean]
+target = "research/targets/semantic-limits.lean"
+theorems = ["VL.PinnedClass.main", "VL.PinnedClass.witness", "VL.PinnedClass.excludedDatum"]
+witnesses = ["VL.PinnedClass.witness"]
+proofs = { "VL.PinnedClass.main" = "⟨1, Fixture.SemanticLimits.pinned_one_empty⟩", "VL.PinnedClass.witness" = "Fixture.SemanticLimits.pinned_zero", "VL.PinnedClass.excludedDatum" = "Fixture.SemanticLimits.pinned_one_empty" }
+imports = ["Fixture.SemanticLimits"]

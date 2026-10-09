@@ -15,7 +15,7 @@ Commands (`--help` lists every flag; `--json` prints versioned JSON, except `vl 
 - `vl show ID[@rev]`: the result card, corrections and limits first. `rev` is a prefix of the item file's git blob sha; status, receipts and reviews are always today's, and the statement, limits and assumptions shown are those on the trusted ref (a worktree edit appears apart as "uncommitted edit, not reviewed"). `--impact`: what depends on it. `--brief --budget N ID…`: context pack for a subagent (without the reviews and relations sections), targeting N characters (default 8,000); mandatory headers can exceed N, with a warning. A source's file is named, never inlined.
 - `vl find TEXT [--kind K]`: search items and the project's Lean declarations (local only; exit 1 when nothing matches).
 - `vl check ID [--explore]`: run the checker and write a receipt; exit 0 pass, 1 fail, 3 error or unsupported. The default protected check takes the question from the trusted ref and counts once its receipt is committed there; `--explore` takes everything from the worktree and never counts.
-- `vl review ID[@rev] --kind fidelity|compare|correction|retraction|understanding --text T --author agent:NAME`; a fidelity review also needs `--verdict faithful|too-weak|vacuous|wrong-definition|unclear`. Sign `--author human:NAME --human-approved` only on text that person wrote or approved.
+- `vl review ID[@rev] --kind fidelity|compare|correction|retraction|understanding --text T --author agent:NAME`; a fidelity review also needs `--verdict faithful|too-weak|vacuous|wrong-definition|unclear` and `--expected-meaning-digest DIGEST`, retained from `vl show ID --json` before reading files at its `trust.commit`. A mismatch requires rereading the changed context. Sign `--author human:NAME --human-approved` only on text that person wrote or approved.
   Fidelity always reviews the current trusted item; an explicit older revision is refused. Other review kinds
   can name historical revisions.
 - `vl validate [--incoming BRANCH]`: references, receipts, reviews, targets, explanations; exit 1 on errors.
@@ -25,8 +25,12 @@ Skills: `vl-orient` (next move, fan-out, integration), `vl-explore`, `vl-prove`,
 
 The coordinator keeps the living research plan in the project's chosen Markdown home: goals, hypotheses, roads,
 why intermediate results matter, failed approaches and reasons to re-plan. Link records; read derived statuses
-from `vl`, rather than copying them into the plan. The harness selects context and launches agents: add relevant
-plan excerpts, dependency links, worked examples or source passages to the compact cards when the task needs them.
+from `vl`, rather than copying them into the plan. External agents and their harness choose rich, sparse or
+deliberately independent strategic context; the harness launches agents. Add relevant plan excerpts, dependency
+links, worked examples or source passages to compact cards when needed. Preserve reusable methods, conditions,
+missing bridges and informative failed
+attempts in short item/plan notes for later sessions; no strategic reading is mandatory. The seven `vl-` skills
+are scoped to this research project; toolkit/instruction fixes follow VerifyLab's CONTRIBUTING.md.
 
 Items are `research/items/<id>.md` with TOML front matter between `+++` lines, then free Markdown; unknown fields are rejected:
 

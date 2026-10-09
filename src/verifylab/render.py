@@ -17,7 +17,7 @@ from typing import Any
 
 from .records import Item
 from .repo import Repo, StoredRecord
-from .status import UNDETERMINED, Status, derive, fidelity, receipt_order, review_order
+from .status import UNDETERMINED, Status, derive, fidelity, receipt_order, review_order, meaning, meaning_digest
 
 LINK_RE = re.compile(r"\[\[([a-z0-9][a-z0-9-]{1,63})(?:@([0-9a-fA-F]{4,40}))?\]\]")
 RELATIONS = (
@@ -288,7 +288,10 @@ def card_data(ctx: Context, item: Item, note: str | None = None) -> dict[str, An
     ]
     relations["linked from"] = [{"id": i, "status": ctx.label(i)} for i in ctx.linked_from.get(item.id, [])]
 
+    current_meaning = meaning(repo, basis)
     return {
+        "meaning": current_meaning,
+        "meaning_digest": meaning_digest(current_meaning) if current_meaning is not None else None,
         "id": item.id,
         "title": item.title,
         "kind": item.kind,
@@ -427,10 +430,13 @@ def _probe_line(name: str, entry: Any, witnesses: list[Any]) -> str:
     if not parts:
         parts.append("no probe result" + (f" ({entry['error']})" if entry.get("error") else "")
                      if entry.get("prop_hypotheses") is None else "not closed by the battery")
+    skipped = entry.get("vacuity_skipped")
+    if skipped:
+        parts.append(f"premise-vacuity skipped: {skipped}")
     hyps = entry.get("prop_hypotheses")
     if isinstance(hyps, int):
         parts.append(f"{hyps} Prop hypothes{'is' if hyps == 1 else 'es'}"
-                     + (", not refuted" if hyps and not entry.get("vacuous_by") else ""))
+                     + (", not refuted" if hyps and not skipped and not entry.get("vacuous_by") else ""))
     return f"- {name}: " + "; ".join(parts)
 
 
@@ -449,6 +455,7 @@ def _proof_lines(d: dict[str, Any]) -> list[str]:
         tactics = len(run.get("battery") or [])
         lines.append(f"statement probes ({tactics} tactic{'' if tactics == 1 else 's'}, "
                      f"{run.get('heartbeats_per_attempt')} heartbeats per attempt):")
+        lines.append("vacuity scope: inconsistency of top-level Prop hypotheses; definition adequacy needs review")
         witnesses = d["lean"].get("witnesses") if isinstance(d["lean"].get("witnesses"), list) else []
         lines += [_probe_line(name, entry, witnesses) for name, entry in sorted(probes.items())]
         lines += [f"- probe problem: {p}" for p in run.get("problems") or []]

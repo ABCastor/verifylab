@@ -1,0 +1,12 @@
+description = "Compatible class with both arbitrary-datum existence and a global instance; the class does not pin the data to zero."
+item = "double-even"
+stage = "trusted"
+expect = "pass"
+clean = ["VL.UnpinnedClass.main", "VL.UnpinnedClass.witness"]
+
+[lean]
+target = "research/targets/semantic-limits.lean"
+theorems = ["VL.UnpinnedClass.main", "VL.UnpinnedClass.witness"]
+witnesses = ["VL.UnpinnedClass.witness"]
+proofs = { "VL.UnpinnedClass.main" = "Fixture.SemanticLimits.solution_exists", "VL.UnpinnedClass.witness" = "⟨0, Fixture.SemanticLimits.solution_exists 0⟩" }
+imports = ["Fixture.SemanticLimits"]

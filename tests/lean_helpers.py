@@ -257,7 +257,9 @@ class ScopePeakMemory:
     def _poll(self) -> None:
         base = f"/sys/fs/cgroup/user.slice/user-{os.getuid()}.slice/user@{os.getuid()}.service"
         while not self._stop.is_set():
-            for scope in glob.glob(f"{base}/vl.slice/run-*.scope") + glob.glob(f"{base}/app.slice/run-*.scope"):
+            units = (glob.glob(f"{base}/vl.slice/run-*.scope") + glob.glob(f"{base}/app.slice/run-*.scope")
+                     + glob.glob(f"{base}/vl.slice/run-*.service"))
+            for scope in units:
                 try:
                     pids = Path(scope, "cgroup.procs").read_text().split()
                     if any(self.marker in Path(f"/proc/{pid}/cmdline").read_bytes().decode(errors="replace")

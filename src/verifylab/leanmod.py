@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Callable, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 RESERVED_PREFIXES = ("VLTrusted", "VLChallenge", "VLSolution")
 _KEYWORDS = {"module", "prelude", "public", "meta", "import", "all"}
@@ -501,3 +501,20 @@ def fill_sorries(text: str, proofs: Mapping[str, str]) -> str:
     for (a, b), proof in sorted(spans, key=lambda x: x[0][0], reverse=True):
         out = out[:a] + "(" + proof.strip() + "\n  )" + out[b:]
     return out
+
+
+def lakefile_options(lakefile_toml: bytes | None, roots: tuple[str, ...]) -> tuple[dict[str, Any], dict[str, dict[str, Any]], str]:
+    """(package leanOptions, per-root lib leanOptions, provenance note) from the project's lakefile.toml."""
+    import tomllib
+
+    if lakefile_toml is None:
+        return {}, {}, "no lakefile.toml: leanOptions not propagated"
+    data = tomllib.loads(lakefile_toml.decode("utf-8"))
+    package = data.get("leanOptions", {}) or {}
+    per_root: dict[str, dict[str, Any]] = {}
+    for lib in data.get("lean_lib", []) or []:
+        lib_roots = lib.get("roots") or [lib.get("name")]
+        for root in roots:
+            if root in lib_roots and lib.get("leanOptions"):
+                per_root[root] = dict(lib["leanOptions"])
+    return dict(package), per_root, "lakefile.toml"

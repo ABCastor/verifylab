@@ -96,12 +96,16 @@ An explicit historical item revision cannot authorize a review of current meanin
 the current trusted item revision and record it, including when worktree prose differs. Existing records whose
 resolvable item revision contradicts their saved meaning are rejected without rewriting them. The self-review
 warning compares the reviewer with the trusted author; editing an author in the worktree does not remove it.
+New writes also require the meaning digest retained before reading the pinned snapshot (`vl show ID --json`).
+The command rejects a mismatch instead of rebinding a judgement to changed bytes. Dry runs can discover the
+current meaning without creating a record. This precondition proves context equality, not understanding.
 A fidelity review records, from the trusted ref, the digest of what decides the meaning of a result: the target (or
 evaluator) and, for Lean, every in-project module of its import closure; the selected theorems and witnesses; the
-item's claim text, its `limits` and its `assumptions`. It counts only while that digest is the one now, and the card
+item's claim text, its `limits` and its `assumptions`, plus the stable Lean semantic environment. It counts only while that digest is the one now, and the card
 says which part changed when it is not. The title and the body explain and are not bound. A review written before
 this records only `target_sha256`, and one written before limits and assumptions were bound lacks their digests;
-each keeps its basis, marked on the card with what it does not bind, and `vl validate` asks for a new one. The
+Older Lean bindings require renewal once semantic-environment binding is supported; they are not rewritten.
+Older Python bindings keep their basis, marked on the card with what they do not bind, and `vl validate` asks for a new one. The
 second counts only until a review that binds limits and assumptions is admitted: otherwise, when that newer review
 went stale through an edited limit, the older one would count again. Two
 reviews with the same words of different meanings are different reviews. Why: a `faithful` review of one file

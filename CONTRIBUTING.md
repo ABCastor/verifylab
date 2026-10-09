@@ -39,7 +39,8 @@ command. Run the fast suite before a commit and the full gate before closing a b
   attributed judgements; an author string or approval flag does not authenticate identity.
 - Reuse Git, Lake and the verification tools for the jobs they already perform. Add a command for demonstrated
   mechanical repetition; keep research judgement in the skills and with the researcher.
-- The external harness selects context and launches agents. The toolkit imposes no model or harness choice.
+- External agents and their harness select context; the harness launches agents. The toolkit imposes no
+  model or harness choice.
 
 A behavior change ships with focused tests and updated documentation. For each guard, plant a defect beside a
 clean control and demonstrate that disabling the guard lets the defect through. Check verdicts and exit codes,

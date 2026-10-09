@@ -132,7 +132,8 @@ def probe_gaps(receipt: dict) -> list[str]:
 
 def probe_notes(receipt: dict) -> list[str]:
     gaps = probe_gaps(receipt)
-    return [f"probes incomplete ({'; '.join(gaps)}): vacuity and triviality of the target were not ruled out"] \
+    return [f"probes incomplete ({'; '.join(gaps)}): this battery did not complete; no absence of vacuity or "
+            "triviality is established"] \
         if gaps else []
 
 
@@ -145,7 +146,7 @@ def single_kernel(repo: Repo, receipt: dict) -> bool:
     it does not count as a pass. (Protected checks refuse to run without nanoda then; older receipts may have one.)"""
     kernels = (receipt.get("checked") or {}).get("kernels")
     return (receipt.get("adapter") == "lean-comparator" and receipt.get("assurance") == "protected"
-            and receipt.get("verdict") == "pass" and isinstance(kernels, list) and "nanoda" not in kernels
+            and receipt.get("verdict") == "pass" and (not isinstance(kernels, list) or "nanoda" not in kernels)
             and repo.config.lean.external_kernels)
 
 
@@ -373,11 +374,48 @@ def question_file(item: Item) -> str | None:
 BOUND_LISTS = ("limits", "assumptions")
 
 
+def semantic_environment(repo: Repo) -> tuple[dict[str, str], list[str]]:
+    """Stable Lean meaning inputs from the pinned trusted commit, excluding cache placement.
+
+    Lake TOML contributes the options the protected check propagates; arbitrary lakefile.lean is bound
+    conservatively by bytes. Invalid structured inputs retain their raw hash and a diagnostic.
+    """
+    project = posixpath.normpath(repo.config.lean.project.strip() or ".")
+    roots = repo.config.lean.roots
+    environment = {"research/vl.toml#meaning-rules": sha256_hex(canonical_json(
+        {"project": project, "roots": sorted(set(roots))}).encode())}
+    problems = []
+    for name in ("lean-toolchain", "lake-manifest.json", "lakefile.toml", "lakefile.lean"):
+        path = name if project == "." else f"{project}/{name}"
+        raw = repo.read_trusted(path)
+        if raw is None:
+            environment[path] = "absent"
+            continue
+        digest = sha256_hex(raw)
+        try:
+            if name == "lake-manifest.json":
+                manifest = json.loads(raw)
+                if not isinstance(manifest, dict):
+                    raise ValueError("manifest must be an object")
+                # Lake's package-store placement is not a dependency identity. Paths inside package
+                # entries remain bound, including path dependencies.
+                digest = sha256_hex(canonical_json({k: v for k, v in manifest.items()
+                                                   if k != "packagesDir"}).encode())
+            elif name == "lakefile.toml":
+                package, libraries, _ = leanmod.lakefile_options(raw, roots)
+                digest = sha256_hex(canonical_json({"package": package, "libraries": libraries}).encode())
+        except (ValueError, TypeError, AttributeError, UnicodeError) as exc:
+            problems.append(f"{path}: {exc}")
+        environment[path] = digest
+    return environment, problems
+
+
 def meaning(repo: Repo, item: Item) -> dict | None:
     """What a fidelity review vouches for, read from the trusted ref: `files`, the target (or evaluator) and, for Lean,
     every in-project module of its import closure, by sha256; the selected `theorems` and `witnesses`;
     `statement_sha256`, the digest of the item's claim text; and `limits_sha256` and `assumptions_sha256`, those of
-    its lists (canonical JSON). None when the target or evaluator is not there."""
+    its lists (canonical JSON). Lean also binds stable project semantic-environment inputs.
+    None when the target or evaluator is not there."""
     path = question_file(item)
     content = repo.read_trusted(path) if path else None
     if content is None:
@@ -389,6 +427,10 @@ def meaning(repo: Repo, item: Item) -> dict | None:
     if item.lean and isinstance(item.lean.get("target"), str):
         basis["theorems"] = [str(t) for t in item.lean.get("theorems") or []]
         basis["witnesses"] = [str(w) for w in item.lean.get("witnesses") or []]
+        environment, problems = semantic_environment(repo)
+        basis["semantic_environment"] = environment
+        if problems:
+            basis["semantic_environment_error"] = "; ".join(problems)
         roots = repo.config.lean.roots
         project = posixpath.normpath(repo.config.lean.project.strip() or ".")
         prel = (lambda p: p) if project == "." else (lambda p: f"{project}/{p}")
@@ -410,6 +452,8 @@ def meaning_digest(basis: dict) -> str:
 def _changed(old: dict, new: dict, target: str) -> str:
     """What differs between the meaning a review recorded and the meaning now, in words."""
     parts = []
+    if old.get("semantic_environment") != new.get("semantic_environment"):
+        parts.append("semantic environment")
     files_then, files_now = old.get("files") or {}, new.get("files") or {}
     if files_then.get(target) != files_now.get(target):
         parts.append("target")
@@ -432,7 +476,8 @@ def _binds_lists(review: StoredRecord) -> bool:
 
 def fidelity(repo: Repo, item: Item) -> Fidelity | None:
     """The fidelity of `item` (as committed on the trusted ref, when it is there). A review counts while the meaning it
-    recorded (meaning_digest) is the meaning now. Older reviews bind less and say what (`unbound`): one recorded
+    recorded (meaning_digest) is the meaning now. Lean reviews without the semantic environment remain
+    readable but require renewal. Older Python reviews bind less and say what (`unbound`): one recorded
     before limits and assumptions were bound counts while the rest of the meaning is the meaning now, until a review
     that binds them is admitted (else it would come back whenever a newer review goes stale through an edited limit);
     one written before reviews recorded a meaning binds only the target file's sha256 (`legacy`), and counts only
@@ -454,7 +499,7 @@ def fidelity(repo: Repo, item: Item) -> Fidelity | None:
         matching = [r for r in reviews if r.data.get("meaning_digest") == meaning_digest(without_lists)]
         unbound = BOUND_LISTS
     legacy = not matching
-    if legacy:
+    if legacy and "semantic_environment" not in now:
         newest = max((_instant(r.data.get("created")) for r in reviews), default=None)
         matching = [r for r in reviews if "meaning_digest" not in r.data
                     and r.data.get("target_sha256") == now["files"][path]
@@ -465,6 +510,10 @@ def fidelity(repo: Repo, item: Item) -> Fidelity | None:
             return Fidelity("not reviewed")
         newest = max(reviews, key=review_order)
         recorded = newest.data.get("meaning")
+        if "semantic_environment" in now and (not isinstance(recorded, dict)
+                                                or "semantic_environment" not in recorded):
+            return Fidelity("review stale: semantic environment not bound; review again",
+                            unbound=("semantic environment",))
         what = _changed(recorded, now, path) if isinstance(recorded, dict) else "target"
         return Fidelity(f"review stale: {what} changed since review")
     latest = max(matching, key=review_order)

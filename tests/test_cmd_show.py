@@ -6,7 +6,7 @@ from pathlib import Path
 from verifylab.cli import main
 from verifylab.records import seal_receipt, sha256_hex, write_new_json
 
-from conftest import commit_all, git, item_question, write_item
+from conftest import synthetic_receipt, commit_all, git, item_question, write_item
 
 
 def vl(capsys, *args):
@@ -38,7 +38,7 @@ def make_item(root: Path, item_id: str, kind: str = "result", body: str = "Body.
 def make_receipt(root: Path, item_id: str = "add-zero", assurance: str = "protected", verdict: str = "pass",
                  finished: str = "t1", extra: dict | None = None) -> Path:
     lean = "Fixture/Basic.lean"
-    receipt = seal_receipt(dict(
+    receipt = synthetic_receipt(root, dict(
         item=item_id, item_revision="a" * 40, question_digest=item_question(root, item_id),
         adapter="lean-comparator", assurance=assurance, verdict=verdict,
         reasons=[] if verdict == "pass" else ["mismatch"],
@@ -178,7 +178,8 @@ def test_receipts_summary_shows_admission_and_staleness(research_repo, monkeypat
     commit_all(root)
     rc, out, _ = vl(capsys, "show", "add-zero")
     assert "status: verified]" in out and "· admitted ·" in out and "inputs fresh" in out
-    assert 'checked: {"axioms": [], "declarations": ["add_zero\'"]}' in out
+    assert ('checked: {"axioms": [], "declarations": ["add_zero\'"], "kernels": ["lean", "nanoda"], '
+            '"permitted_axioms": [], "theorems": ["Fixture.receipt"]}') in out
     (root / "Fixture" / "Basic.lean").write_text("-- changed\n")
     rc, out, _ = vl(capsys, "show", "add-zero")
     assert "verified-stale" in out and "STALE inputs: Fixture/Basic.lean" in out

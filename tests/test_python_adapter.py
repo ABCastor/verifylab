@@ -318,6 +318,12 @@ def test_genuine_candidate_passes_with_full_provenance(planted: Path) -> None:
     assert outcome.environment["python_version"]
     assert "evaluator not mounted" in outcome.environment["isolation"]["candidate"]
     assert outcome.environment["guards_disabled"] == []
+    from verifylab.commands.check import build_receipt
+    from verifylab.records import receipt_problems
+    repo = Repo.open(planted)
+    item = repo.load_item("nth-prime")
+    receipt = build_receipt(repo, item, item, "python-eval", "protected", repo.trusted_commit, outcome, "t0", "t1")
+    assert receipt_problems(json.loads(json.dumps(receipt))) == []
 
 
 @needs_jail

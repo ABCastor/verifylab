@@ -5,6 +5,9 @@ description: Improve existing results in a VerifyLab project — clean the sourc
 
 # vl-improve — four different kinds of better
 
+Scope: improve research artifacts in the current VerifyLab project. For a defect in the toolkit or its
+instructions, follow VerifyLab's CONTRIBUTING.md workflow with an explicitly scoped change.
+
 "Shorter" is not the goal. Pick the mode from the bottleneck, say which one you are doing, and
 show what was gained and what was lost.
 
@@ -14,6 +17,19 @@ show what was gained and what was lost.
 | **Simplify the mathematics** | the argument is hard to follow or to check | fewer or more natural steps, same or weaker premises; compare the full dependency burden | fewer Lean lines with the same idea |
 | **Strengthen / generalize** | assumptions block reuse, scope too narrow, bound too weak | fewer premises, wider scope, better bound or a cleaner trade-off; may need MORE code | a new name for the same statement |
 | **Explain / reuse** | others cannot apply the result correctly | a fresh reader or agent applies it to a new question and names its limits | a summary that hides the hard step |
+
+## Work from the current result
+1. Read the full card and artifact at the relevant revision, including corrections, assumptions, limits, source
+   and existing attempts. Inspect the actual proof or implementation; an attractive summary can hide its cost.
+2. Choose the mode and state the intended gain: fewer premises, a stronger conclusion, simpler dependencies,
+   reduced maintenance or a reusable explanation. Name what must remain true and which goal/use benefits.
+3. Make the smallest useful change. For a new mathematical statement, propose its target and test the changed
+   premises/boundaries with `vl-prove`; for changed computational/empirical claims use `vl-experiment`.
+4. Check the new claim through the appropriate evidence and coordinator admission. Compare the complete old
+   and new contracts, including any new assumptions/dependencies. Routine source cleanup keeps its diff/checks;
+   changed meaning needs its review. Report a failed improvement honestly and keep useful intermediate work.
+5. Preserve the reusable method and failure boundary in the item; feed run-level lessons into the existing
+   plan/notebook. Record a comparison when mathematical strength or use changed, as described below.
 
 ## Rules
 - A stronger or more general version is a claim: state the exact implication, equivalence or
@@ -26,11 +42,13 @@ show what was gained and what was lost.
 - A longer version can be the better one. Conclude that when it is true.
 - Look for the canonical form: the natural generality, the right proof rather than the first one,
   and the links to neighbouring results (Tao's "canonicalization"). Generalize by concentration, not
-  dilution; prefer natural generality to finitary simplifications, where blueprint errors cluster.
-- After an obligation closes, look back: which hypotheses were used, a second proof, the sibling
-  questions the method reaches, where it stops. Write the method in the result's body: trigger (the
-  goal's shape), move, example, fails-when.
+  dilution; compare the assumptions and boundary cases of a finitary simplification before trusting its reuse.
+- After a useful result, consider a selective look back: which hypotheses were used, a second proof, the sibling
+  questions the method reaches, where it stops. Preserve a reusable method in the result's body:
+  trigger (the goal's shape), move, example, fails-when.
 
 ## Record
-New or revised `result` items with targets, a `compare` review against the previous version
-(mode, what improved, what got worse, evidence), and the protected checks run by the coordinator.
+New or revised `result` items with targets and the protected checks run by the coordinator. A `compare` review
+records changes to mathematical strength, assumptions, reusable interfaces or disputed trade-offs (mode, what
+improved, what got worse, evidence). Routine source cleanup needs its diff and checks, not a separate comparison
+judgement when the mathematical contract is unchanged.

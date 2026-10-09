@@ -4,12 +4,12 @@ from verifylab.records import seal_receipt, seal_review, sha256_hex, write_new_j
 from verifylab.repo import Repo
 from verifylab.status import derive
 
-from conftest import commit_all, item_question, write_item
+from conftest import synthetic_receipt, commit_all, item_question, write_item
 
 
 def _write_receipt(root, verdict="pass", assurance="protected"):
     lean = "Fixture/Basic.lean"
-    receipt = seal_receipt(dict(
+    receipt = synthetic_receipt(root, dict(
         item="add-zero", item_revision="a" * 40, question_digest=item_question(root, "add-zero"),
         adapter="lean-comparator", assurance=assurance,
         verdict=verdict, reasons=[] if verdict == "pass" else ["mismatch"],
@@ -74,7 +74,7 @@ def test_a_protected_receipt_in_the_explore_store_is_never_admitted(research_rep
     is never admitted and never protected, whatever the receipt says and wherever it is committed."""
     root = research_repo
     lean = "Fixture/Basic.lean"
-    receipt = seal_receipt(dict(
+    receipt = synthetic_receipt(root, dict(
         item="add-zero", item_revision="a" * 40, question_digest=item_question(root, "add-zero"),
         adapter="lean-comparator", assurance="protected", verdict="pass",
         reasons=[], inputs={"digest": "d", "files": {lean: sha256_hex((root / lean).read_bytes())}},
@@ -138,7 +138,7 @@ def test_a_receipt_without_a_question_digest_is_bound_through_its_item_revision(
     lean = "Fixture/Basic.lean"
 
     def legacy(revision: str, finished: str) -> None:
-        receipt = seal_receipt(dict(
+        receipt = synthetic_receipt(root, dict(
             item="add-zero", item_revision=revision, adapter="lean-comparator", assurance="protected",
             verdict="pass", reasons=[], inputs={"digest": "d", "files": {lean: sha256_hex((root / lean).read_bytes())}},
             environment={}, checked={}, command=["vl"], started_at="t0", finished_at=finished, tool_version="vl 0.1.0"))
@@ -163,7 +163,7 @@ def test_a_receipt_without_a_question_digest_is_bound_through_its_item_revision(
 
 
 def _receipt(root, files: dict[str, str], verdict="pass", finished="t1", started="t0"):
-    receipt = seal_receipt(dict(
+    receipt = synthetic_receipt(root, dict(
         item="add-zero", item_revision="a" * 40, question_digest=item_question(root, "add-zero"),
         adapter="lean-comparator", assurance="protected", verdict=verdict,
         reasons=[] if verdict == "pass" else ["the solution's statement differs"],
@@ -290,3 +290,30 @@ def test_labels_for_questions_records_and_inconclusive_checks(research_repo):
     _receipt(root, _digests(root, "Fixture/Basic.lean"), finished="t2")
     commit_all(root)
     assert labels() == {"qq": "answered", "add-zero": "verified", "prose": "recorded-prose"}
+
+
+def test_missing_or_empty_kernel_coverage_never_bypasses_external_requirement(research_repo):
+    from verifylab.status import single_kernel
+    from dataclasses import replace
+    repo = Repo.open(research_repo)
+    repo.config = replace(repo.config, lean=replace(repo.config.lean, external_kernels=True))
+    base = {"adapter": "lean-comparator", "assurance": "protected", "verdict": "pass"}
+    assert not single_kernel(repo, {**base, "checked": {"kernels": ["lean", "nanoda"]}})
+    for checked in ({}, {"kernels": []}, {"kernels": ["lean"]}, {"kernels": None}):
+        assert single_kernel(repo, {**base, "checked": checked})
+
+
+def test_admitted_resealed_pass_without_coverage_is_rejected(research_repo):
+    import json
+    root = research_repo
+    _write_receipt(root)
+    path = next((root / "research/evidence/add-zero").glob("*.json"))
+    data = json.loads(path.read_text())
+    data["checked"] = {}
+    path.unlink()
+    data = seal_receipt(data)
+    write_new_json(path.parent / f"{data['receipt_id'][:16]}.json", data)
+    commit_all(root)
+    status = _status(root)
+    assert status.label == "unverified"
+    assert any("rejected receipt" in n and "checked.kernels" in n for n in status.notes)

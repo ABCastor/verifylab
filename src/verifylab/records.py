@@ -11,7 +11,7 @@ import re
 import tomllib
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 ITEM_KINDS = ("question", "result", "conjecture", "source", "intuition", "explanation")
@@ -244,7 +244,9 @@ _RECEIPT_SHAPE = {
               "modules": _ListOf({"module": str, "ms": _NUMBER})},
 }
 _REVIEW_SHAPE = {"verdict": str, "target_sha256": str, "target_path": str, "compare_with": str, "meaning_digest": str,
-                 "meaning": {"files": _MapOf(str), "theorems": _ListOf(str), "witnesses": _ListOf(str),
+                 "trusted_ref": str, "trusted_commit": str,
+                 "meaning": {"semantic_environment": _MapOf(str), "semantic_environment_error": str,
+                             "files": _MapOf(str), "theorems": _ListOf(str), "witnesses": _ListOf(str),
                              "statement_sha256": str, "limits_sha256": str, "assumptions_sha256": str,
                              "closure_error": str}}
 
@@ -288,6 +290,82 @@ _RECEIPT_REQUIRED = {
 }
 
 
+def _protected_pass_problems(receipt: dict) -> list[str]:
+    """A protected pass must record the provenance and coverage its adapter actually produces."""
+    adapter = receipt["adapter"]
+    if adapter not in ("lean-comparator", "python-eval"):
+        return [f"protected pass has unknown adapter '{adapter}'"]
+    target = receipt.get("target")
+    if not isinstance(target, dict) or not target:
+        return ["protected pass needs a non-empty target"]
+    inputs, checked, environment = receipt["inputs"], receipt["checked"], receipt["environment"]
+    problems = []
+    trusted = inputs.get("trusted_files")
+    if not isinstance(trusted, dict) or not trusted:
+        return ["protected pass needs non-empty inputs.trusted_files"]
+    for name, files in (("files", inputs["files"]), ("trusted_files", trusted)):
+        for path, digest in files.items():
+            if (path in ("", ".") or path != str(PurePosixPath(path)) or PurePosixPath(path).is_absolute()
+                    or ".." in PurePosixPath(path).parts or "\\" in path or "\0" in path):
+                problems.append(f"inputs.{name} path '{path}' must be normalized and repository-relative")
+            if not re.fullmatch(r"[0-9a-f]{64}", digest):
+                problems.append(f"inputs.{name} digest for '{path}' must be a hex sha256")
+    commit = inputs.get("trusted_commit")
+    if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", commit):
+        problems.append("protected pass needs inputs.trusted_commit as a full Git commit id")
+    if target.get("source") != "trusted-commit" or target.get("commit") != commit:
+        problems.append("protected pass target must come from inputs.trusted_commit")
+    path = target.get("path" if adapter == "lean-comparator" else "evaluator")
+    if not isinstance(path, str) or path not in trusted or target.get("sha256") != trusted.get(path):
+        problems.append("target identity and sha256 must match its inputs.trusted_files entry")
+    basis = {"files": inputs["files"], "trusted_files": trusted, "target": target}
+    if inputs["digest"] != "sha256:" + sha256_hex(canonical_json(basis).encode("utf-8")):
+        problems.append("inputs.digest does not match files, trusted_files and target")
+    if adapter == "lean-comparator":
+        theorems = target.get("theorems")
+        if (not isinstance(theorems, list) or not theorems
+                or not all(isinstance(t, str) and t.strip() for t in theorems)
+                or len(set(theorems)) != len(theorems) or checked.get("theorems") != theorems):
+            problems.append("protected Lean pass needs checked.theorems matching non-empty target.theorems")
+        kernels = checked.get("kernels")
+        if not isinstance(kernels, list) or "lean" not in kernels:
+            problems.append("protected Lean pass needs checked.kernels including lean")
+        if not isinstance(checked.get("permitted_axioms"), list):
+            problems.append("protected Lean pass needs checked.permitted_axioms")
+        for key in ("toolchain", "lean_version"):
+            if not isinstance(environment.get(key), str) or not environment[key].strip():
+                problems.append(f"protected Lean pass needs environment.{key}")
+        tools = environment.get("tools")
+        for tool in ("comparator", "lean4export", "landrun", *(["nanoda"] if isinstance(kernels, list)
+                                                               and "nanoda" in kernels else [])):
+            identity = tools.get(tool) if isinstance(tools, dict) else None
+            if (not isinstance(identity, dict) or not isinstance(identity.get("path"), str)
+                    or not identity["path"] or not isinstance(identity.get("sha256"), str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", identity["sha256"])):
+                problems.append(f"protected Lean pass needs environment.tools.{tool} path and sha256")
+    else:
+        cases = checked.get("cases")
+        if (type(cases) is not int or cases <= 0 or type(checked.get("passed")) is not int
+                or checked["passed"] != cases or type(checked.get("failed")) is not int or checked["failed"] != 0
+                or type(checked.get("judge_errors")) is not int or checked["judge_errors"] != 0):
+            problems.append("protected Python pass needs positive checked.cases, all passed, no failures or judge errors")
+        digest = target.get("cases_sha256")
+        if (not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                or checked.get("cases_sha256") != digest):
+            problems.append("checked.cases_sha256 must match target.cases_sha256")
+        candidate, entry = target.get("candidate"), target.get("entry")
+        if not isinstance(candidate, str) or candidate not in inputs["files"]:
+            problems.append("target.candidate must name an inputs.files entry")
+        if not isinstance(entry, str) or not entry.isidentifier():
+            problems.append("target.entry must be a Python identifier")
+        for key in ("interpreter", "python_version"):
+            if not isinstance(environment.get(key), str) or not environment[key].strip():
+                problems.append(f"protected Python pass needs environment.{key}")
+    if not isinstance(environment.get("isolation"), dict) or not environment["isolation"]:
+        problems.append("protected pass needs environment.isolation")
+    return problems
+
+
 def receipt_problems(receipt: Any) -> list[str]:
     """Structural problems of a receipt; an empty list means well-formed and self-consistent."""
     if not isinstance(receipt, dict):
@@ -312,6 +390,8 @@ def receipt_problems(receipt: Any) -> list[str]:
         problems.append("inputs.digest must be a string")
     problems += _shape_problems(receipt, _RECEIPT_SHAPE, "")
     try:
+        if not problems and receipt["assurance"] == "protected" and receipt["verdict"] == "pass":
+            problems += _protected_pass_problems(receipt)
         if receipt["receipt_id"] != receipt_id(receipt):
             problems.append("receipt_id does not match its content (edited or forged)")
     except UnicodeEncodeError:

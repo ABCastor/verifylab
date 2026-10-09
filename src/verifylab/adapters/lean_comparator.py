@@ -39,12 +39,14 @@ statement mentions. So the check project is built like this:
   that weakens its own copy of the target passes there, which is why exploratory receipts never count as verified.
 
 Isolation: Comparator runs via `lake env comparator config.json` inside `verifylab.jail.Jail` (bwrap,
-no network, scrubbed environment) under a systemd memory cap. Comparator's own landrun (Landlock)
+no network, scrubbed environment). Protected checks use an outer systemd service enforcing Comparator's
+`RestrictAddressFamilies=~AF_UNIX`, verified before each exec, with the same memory and task caps.
+Comparator's own landrun (Landlock)
 sandbox runs nested inside bwrap; before every check a probe proves Landlock really denies a write that
 bwrap allows, because landrun's `--best-effort` would otherwise degrade to no sandbox silently.
 Its output is read while it runs (line-buffered with `stdbuf -oL`; `env`, `stdbuf`, `sh` and `git` are started by
 absolute path from the machine's launchers, never from PATH), so the receipt records where the time
-went: Comparator's phases, Lake's per-module build times and job counts, the memory scope's peak.
+went: Comparator's phases, Lake's per-module build times and job counts, the memory unit's peak.
 
 Statement probes (`lean_probes`): before Comparator, the challenge is built with the same `lake build` under
 the same landrun sandbox Comparator uses, and its build products are copied to a separate probe workspace;
@@ -76,6 +78,7 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from .. import candidate_exec, gitref, jail, leanlint, leanmod
+from ..leanmod import lakefile_options
 from . import lean_probes
 from ..config import CONFIG_PATH, RULES_INPUT, Config, ConfigError, parse_config, rules_digest
 from ..machine import REVISIONS, Machine, MachineError, file_sha256 as machine_file_sha256, load as load_machine
@@ -366,22 +369,6 @@ def render_lakefile(packages_dir: Path | None, requires: list[dict[str, Any]], p
     return "\n".join(lines) + "\n"
 
 
-def lakefile_options(lakefile_toml: bytes | None, roots: tuple[str, ...]) -> tuple[dict[str, Any], dict[str, dict[str, Any]], str]:
-    """(package leanOptions, per-root lib leanOptions, provenance note) from the project's lakefile.toml."""
-    import tomllib
-
-    if lakefile_toml is None:
-        return {}, {}, "no lakefile.toml: leanOptions not propagated"
-    data = tomllib.loads(lakefile_toml.decode("utf-8"))
-    package = data.get("leanOptions", {}) or {}
-    per_root: dict[str, dict[str, Any]] = {}
-    for lib in data.get("lean_lib", []) or []:
-        lib_roots = lib.get("roots") or [lib.get("name")]
-        for root in roots:
-            if root in lib_roots and lib.get("leanOptions"):
-                per_root[root] = dict(lib["leanOptions"])
-    return dict(package), per_root, "lakefile.toml"
-
 
 def dependency_identity(packages_dir: Path, packages: list[dict[str, Any]], modules: Sequence[str]) -> dict[str, Any]:
     """What the shared build cache held for this check, as git and Lake describe it: each package's checked-out
@@ -645,8 +632,9 @@ class ComparatorRun:
     stderr: str
     lines: tuple[tuple[float, str, str], ...]    # (seconds since start, stream, line), as they arrived
     seconds: float
-    memory_peak: int | None                      # bytes, the memory scope's MemoryPeak
+    memory_peak: int | None                      # bytes, the memory unit's MemoryPeak
     line_buffered: bool                          # Comparator's stdout reached us line by line (stdbuf -oL)
+    command: tuple[str, ...]
 
 
 def comparator_command(comparator: Path, project: Path, config_path: Path) -> list[str]:
@@ -667,7 +655,7 @@ def run_comparator(box: jail.Jail, comparator: Path, project: Path, config: dict
     command = comparator_command(comparator, project, config_path)
     run = jail.stream(box, command, timeout=timeout, memory_max=memory_max, memory_total=memory_total)
     return ComparatorRun(run.returncode, run.stdout.decode("utf-8", "replace"), run.stderr.decode("utf-8", "replace"),
-                         run.lines, run.seconds, run.memory_peak, "-oL" in command)
+                         run.lines, run.seconds, run.memory_peak, "-oL" in command, run.argv)
 
 
 _LAKE_JOB = re.compile(r"^\S \[(\d+)/(\d+)\](?: \(Optional\))? (\w+) (\S+)(?: \((\d+(?:\.\d+)?)(ms|s)\))?$")
@@ -1115,7 +1103,7 @@ class _Check:
             dest.write_bytes(data)
 
         # Jail, isolation probe, Comparator.
-        box = comparator_jail(scratch, tc_dir, used_tools, packages_dir)
+        box = replace(comparator_jail(scratch, tc_dir, used_tools, packages_dir), deny_unix=self.protected)
         mark = time.monotonic()
         phases = {"prepare": round(mark - self.started, 2)}
         self.extra["phases"] = phases
@@ -1147,10 +1135,9 @@ class _Check:
                 raise _Stop("error", f"timed out after {req.timeout:.0f} s")
             runs += 1
             config_path = scratch / "comparator.json"
-            self.command = jail.memory_capped(box.argv(comparator_command(used_tools["comparator"], project, config_path)),
-                                              req.memory_max, req.memory_total)
             run = run_comparator(box, used_tools["comparator"], project, cfg, config_path,
                                  timeout=remaining, memory_max=req.memory_max, memory_total=req.memory_total)
+            self.command = list(run.command)
             self.log.append(f"=== comparator run {runs}: {json.dumps(cfg)}\n"
                             f"--- exit {run.returncode} --- stdout\n{run.stdout}\n--- stderr\n{run.stderr}")
             measured = timings(run.lines, run.seconds)          # of the last run (more runs only with a guard off)
@@ -1354,8 +1341,10 @@ class _Check:
                        + (f" ({probe.landlock})" if probe.landlock else ""),
             "memory_max": self.req.memory_max,
             "memory_total": self.req.memory_total,
-            "systemd_scope": capped,
-            "slice": jail.SLICE if capped else None,
+            "systemd_scope": capped and not box.deny_unix,
+            "systemd_service": box.deny_unix,
+            "restrict_address_families": "~AF_UNIX (socket probe enforced before each exec)" if box.deny_unix else None,
+            "slice": jail.SLICE if capped or box.deny_unix else None,
         }
         if not enforced:
             raise _Stop("unsupported", "landrun did not enforce Landlock inside bwrap (probe write was not "

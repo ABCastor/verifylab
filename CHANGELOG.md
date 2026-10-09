@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased
+
+- Preserve a guarded command's exit status while reaping surviving children. Services kill children immediately
+  and allow one second for reaping, avoiding false stop-timeout failures after successful probe runs.
+
+- Text and brief cards display recorded premise-vacuity skip reasons and the scope of that probe; skipped
+  premise tests no longer read as “not refuted”. Status and receipt formats are unchanged. Planted solution-class
+  and datum-pinning cases document the remaining semantic limits. Skills assess bounded contributions and
+  preserve scoped, source-linked notes before relying on them.
+
+- Broaden `vl-understand` to scientific dialogue about goals, relevant results, intuitions and experiments,
+  with reciprocal critique, scoped failure evidence and distinct human/agent attribution. Coordinators
+  support user-requested dialogue as well as autonomous work.
+
+- Skills support agent-owned rich, sparse or independent context, varied research tasks and dense continuity
+  notes. Exploration heuristics remain optional; check/review boundaries retain their contracts. Scope research
+  improvement explicitly to the current research project.
+
+- Enforce the pinned Comparator's outer AF_UNIX restriction for protected Lean through a guarded systemd
+  service, preserving resource caps and whole-unit deadlines. Protected Lean now requires a working user manager.
+
+- Protected passing receipts require coherent target provenance, input digests, adapter coverage and environment;
+  incomplete historical passes remain on disk but cannot verify a result. Partial execution records stay readable.
+- New fidelity writes require `--expected-meaning-digest`; `show --json` exposes the pinned meaning basis and digest.
+  Lean reviews bind the stable toolchain, dependency manifest and relevant Lake configuration. Older Lean reviews
+  without that environment require renewal; cache placement alone does not invalidate them.
+- Source `ref` identifiers are searchable and shown with their access level; older derived indexes rebuild.
+- Document the integrator trust assumption, asserted relations and finite probe limits. Skills support scoped
+  blind read-back, provisional notebooks and appropriate empirical methods without per-edit review ceremony.
+
 ## 0.1.0 — 2026-10-04
 
 First public release, licensed under Apache-2.0. Bundled Comparator fixtures retain their upstream licence

@@ -12,7 +12,7 @@ from verifylab.records import git_blob_sha, seal_receipt, sha256_hex, write_new_
 from verifylab.repo import Repo
 from verifylab.status import derive
 
-from conftest import commit_all, git
+from conftest import synthetic_receipt, commit_all, git
 
 CONFIG = "research/vl.toml"
 
@@ -25,7 +25,7 @@ def vl(capsys, *args):
 
 def _forge_receipt(root: Path) -> Path:
     lean = "Fixture/Basic.lean"
-    receipt = seal_receipt(dict(
+    receipt = synthetic_receipt(root, dict(
         item="add-zero", item_revision=git_blob_sha((root / "research/items/add-zero.md").read_bytes()), adapter="lean-comparator", assurance="protected", verdict="pass",
         reasons=[], inputs={"digest": "d", "files": {lean: sha256_hex((root / lean).read_bytes())}},
         environment={}, checked={}, command=["vl"], started_at="t0", finished_at="t1", tool_version="vl 0.1.0"))

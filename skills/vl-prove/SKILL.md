@@ -10,15 +10,16 @@ description: Prove or refute a precise statement in a VerifyLab project — Lean
   target theorem ending in `:= sorry`. Domain, dimension, premises and definitions are part of it.
 - You never edit a target or the definitions it uses to make a proof go through. If the target is
   wrong, propose a new one and ask for a `fidelity` review; that is a different act from proving.
-- Before proving, test non-vacuity: can the premises hold together? Is there a degenerate case
-  (empty set, zero, trivial type) that makes the statement empty or trivial? A target theorem with
-  hypotheses comes with a witness in the same target: a theorem that instantiates them on a concrete
-  object (`theorem witness : ∃ n, 0 < n ∧ …`), listed in `[lean] theorems` and `[lean] witnesses`.
-  `vl validate` warns without one; `vl check` probes whether automation alone closes a target theorem
-  or refutes its hypotheses (`vacuous`).
+- Examine non-vacuity where the intended application needs realizable premises: can they hold together,
+  including empty/zero/trivial cases? Supply a concrete witness when available (`theorem witness : ∃ n,
+  0 < n ∧ …`), listed in `[lean] theorems` and `[lean] witnesses`. If realizability is an open obligation,
+  preserve that gap and the conditional claim; do not invent a witness.
+  `vl validate` warns without a witness; `vl check` still probes trivial closure and inconsistent hypotheses
+  (`vacuous`). An intentional impossibility claim needs an explicit conclusion about that impossibility;
+  purpose does not override the checker's current status policy.
 
 ## Attack from both sides
-- Guess, refute, then prove the survivors: small instances, edge cases, a random model, guessed answers
+- One useful attack is to guess, seek counterexamples and prove survivors: small instances, edge cases, a random model, guessed answers
   checked exactly. Build an instance with X but not Y before banking "X implies Y"; ask whether your method
   also proves something known to be false.
 - Backward, by records: a reduction is a result of its own, target `theorem red : B₁ → … → Bₖ → T`, each `Bᵢ`
@@ -40,6 +41,14 @@ description: Prove or refute a precise statement in a VerifyLab project — Lean
   stronger than asked, or that never uses a hypothesis indicts the target first. If a proof and a refutation of
   the same statement both look accepted, stop: a target, a definition or a checker is wrong; report an incident.
 
+## New models, premises and intermediate goals
+- Propose definitions, models, candidate axioms or microgoals when they clarify a route. Explain the role and
+  unresolved bridge; keep an assumed principle explicit in a conjecture or theorem premise. A conditional
+  theorem does not establish its premise. New hypotheses change the question and need their own proposed target.
+- Seek boundary, asymptotic or impossibility results when useful, stating the exact regime and claim. An
+  intentional impossibility result must not be described as a construction with realizable premises.
+- A proposed axiom is not permission to alter the checker or its permitted axioms.
+
 ## Lean discipline
 - Say exactly which declaration proves which target. A file that compiles, a proved helper and the
   requested theorem are different objects. `def claim : Prop := …` compiles and proves nothing.
@@ -47,7 +56,7 @@ description: Prove or refute a precise statement in a VerifyLab project — Lean
   written in scope of the target theorem's binders (e.g. `"Lib.lemma k n"`), plus `imports`; or
   `solution = "<module>"` that declares the target theorems itself.
 - A new result needs its own target: write `research/targets/<id>.lean` in your lane (theorems
-  ending in `:= sorry`, plus a witness theorem when they have hypotheses). It is a proposal until the coordinator
+  ending in `:= sorry`, plus a witness theorem for realizable hypotheses when available). It is a proposal until the coordinator
   admits it and a fidelity review accepts it. Never modify an existing target. Definitions the
   target needs must live in an in-project module that the target imports (keep it definitions-only,
   separate from the proofs), so the reviewer can read exactly what the statement means.
@@ -72,5 +81,6 @@ declaration names; every hypothesis of the target theorems stated in `assumption
 ("exploratory check only", "not yet admitted": the status is derived, and `vl validate` warns); a
 `refutes = [...]` link for a counterexample; `answers = ["<question>"]` only with the question's own
 `[lean]` target and theorems, or its own `[python]` evaluator and entry (`vl validate` reports any other
-as an error); failed attempts that rule out a route as a short note on the question or conjecture. Then
+as an error); informative failed attempts as short notes on the question or conjecture, distinguishing an unsuccessful
+attempt from a checked counterexample. Preserve the useful proof idea, conditions and next gap with links. Then
 hand over to the coordinator for the protected check and admission.
