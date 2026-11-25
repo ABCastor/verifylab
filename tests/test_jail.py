@@ -311,7 +311,8 @@ def test_a_stop_timeout_after_a_clean_exit_is_named_as_systemds(tmp_path, monkey
     run = jail.stream(jail.Jail(workdir=tmp_path, deny_unix=True), ["true"], timeout=20)
     assert run.stdout == b"All targets up-to-date\n", run
     if force_stop_timeout:
-        assert run.returncode == 1 and "result 'timeout'" in run.service and "status=0/SUCCESS" in run.service, run
+        clean = re.search(r"status=0(/SUCCESS)?\)", run.service)     # systemd 255 writes `code=exited/status=0`
+        assert run.returncode == 1 and "result 'timeout'" in run.service and clean, run
         assert run.stderr == f"vl: {run.service}\n".encode()
     else:
         assert (run.returncode, run.service, run.stderr) == (0, None, b""), run

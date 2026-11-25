@@ -326,8 +326,10 @@ def test_exec_retries_a_busy_overlay_but_runs_the_command_once(lane_repo, monkey
             monkeypatch.setattr(queue.Ticket, "run", release_after_first_mount_attempt)
             command = f"echo once >> .lake/executions; exit {exit_code}"
             assert cli.main(["lane", "exec", "la", "--", "/bin/sh", "-c", command]) == exit_code
-            assert len(codes) >= 2 and codes[0] == 1
             assert (upper / "executions").read_text() == "once\n"
+            # A kernel that refuses a second overlay on an upper directory in use fails the first attempt, which is
+            # retried; one that mounts it (GitHub's Ubuntu runners) runs the command at the first attempt.
+            assert codes[-1] == exit_code and (len(codes) == 1 or codes[0] == 1), codes
         finally:
             if holder.poll() is None:
                 holder.kill()
