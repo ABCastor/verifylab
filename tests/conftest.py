@@ -188,6 +188,9 @@ def machine_home(tmp_path_factory, monkeypatch, pinned_tools):
     monkeypatch.setenv("XDG_DATA_HOME", str(base / "data"))
     monkeypatch.setenv("XDG_STATE_HOME", str(base / "state"))
     monkeypatch.delenv("VL_QUEUE_JOB", raising=False)
+    git_config = base / "config" / "git" / "config"      # an author for test commits on a machine without one;
+    git_config.parent.mkdir(parents=True)                # a repository's own user.* and ~/.gitconfig still win
+    git_config.write_text("[user]\n\tname = Test\n\temail = test@example.com\n")
     write_machine(pinned_tools, elan_home=lean_elan_home())
     return base
 
