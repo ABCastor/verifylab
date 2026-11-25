@@ -298,3 +298,63 @@ def test_with_the_approval_guard_disabled_a_forged_human_review_is_written(resea
     monkeypatch.chdir(root)
     monkeypatch.setattr(review, "human_approval_problem", lambda args: None)
     assert vl(capsys, *UNDERSTOOD)[0] == 0 and len(review_files(root)) == 1
+
+
+def test_review_emit_and_import_preserves_lock_on_direct_and_skips_lock_on_emit(research_repo, monkeypatch, capsys, tmp_path):
+    root = research_repo
+    monkeypatch.chdir(root)
+    _admit_fidelity_target(root)
+    digest_args = meaning_args()
+    emitted = tmp_path / "fidelity.review.json"
+    git_dir = root / ".git"
+    # Make .git read-only so any attempt to open vl-review-write.lock fails cleanly.
+    git_dir.chmod(0o555)
+    try:
+        code, out, _ = vl(capsys, "review", "add-zero", "--kind", "fidelity", "--verdict", "faithful",
+                          "--author", "agent:referee", *digest_args,
+                          "--text", "Checked emitted fidelity", "--emit", str(emitted), "--json")
+        data = json.loads(out)
+        assert code == 0 and data["emitted"] is True and emitted.exists()
+        assert not (git_dir / "vl-review-write.lock").exists()
+        assert len(review_files(root)) == 0
+    finally:
+        git_dir.chmod(0o755)
+    # Direct review still acquires the repository lock.
+    direct = vl(capsys, "review", "add-zero", "--kind", "understanding", "--author", "agent:helper",
+                "--text", "Direct lock check")[0]
+    assert direct == 0 and (git_dir / "vl-review-write.lock").exists() and len(review_files(root)) == 1
+    # Integrator imports the emitted fidelity review through the lock, and rejects a duplicate import.
+    code, out, _ = vl(capsys, "review", "--import", str(emitted), "--json")
+    imported = json.loads(out)
+    assert code == 0 and imported["review"]["meaning_digest"] == digest_args[1] and len(review_files(root)) == 2
+    assert vl(capsys, "review", "--import", str(emitted))[0] == 2
+
+
+def test_review_import_rejects_stale_meaning_unapproved_human_and_mixed_flags(research_repo, monkeypatch, capsys, tmp_path):
+    from verifylab.commands import review
+    root = research_repo
+    monkeypatch.chdir(root)
+    _admit_fidelity_target(root)
+    digest_args = meaning_args()
+    emitted = tmp_path / "human.review.json"
+    assert vl(capsys, "review", "add-zero", "--kind", "fidelity", "--verdict", "faithful",
+              "--author", "human:ada", "--human-approved", *digest_args,
+              "--text", "Approved fidelity", "--emit", str(emitted))[0] == 0
+    # Planted: human review without --human-approved on --import is refused without a terminal.
+    assert vl(capsys, "review", "--import", str(emitted))[0] == 2 and len(review_files(root)) == 0
+    # Planted: mixed creation flags are refused.
+    assert vl(capsys, "review", "--import", str(emitted), "--kind", "fidelity")[0] == 2
+    # Planted: tampered meaning digest is refused.
+    tampered = tmp_path / "tampered.review.json"
+    bad = json.loads(emitted.read_text())
+    bad["meaning_digest"] = "0" * 64
+    tampered.write_text(json.dumps(bad))
+    assert vl(capsys, "review", "--import", str(tampered), "--human-approved")[0] == 2
+    # Valid control with --human-approved succeeds; disabling the guard also lets an unapproved second copy slip.
+    assert vl(capsys, "review", "--import", str(emitted), "--human-approved")[0] == 0 and len(review_files(root)) == 1
+    emitted2 = tmp_path / "human2.review.json"
+    assert vl(capsys, "review", "add-zero", "--kind", "understanding", "--author", "human:ada",
+              "--human-approved", "--text", "Another note", "--emit", str(emitted2))[0] == 0
+    assert vl(capsys, "review", "--import", str(emitted2))[0] == 2
+    monkeypatch.setattr(review, "human_approval_problem", lambda args: None)
+    assert vl(capsys, "review", "--import", str(emitted2))[0] == 0 and len(review_files(root)) == 2

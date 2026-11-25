@@ -1,0 +1,28 @@
+{
+  "adapter": "lean-comparator",
+  "checked": {
+    "kernels": [
+      "lean",
+      "nanoda"
+    ],
+    "trusted_modules": []
+  },
+  "environment": {
+    "packages": {
+      "dir": "/fixture/packages",
+      "identity": {
+        "revisions": {},
+        "traces": {}
+      }
+    }
+  },
+  "finished_at": "2026-10-02T00:00:00Z",
+  "inputs": {
+    "trusted_files": {
+      "research/vl.toml#verdict-rules": "b0e662efd8e8c8d44de1c10db42e2fa59e0bbd446c21043829f271592853ecc1"
+    }
+  },
+  "item_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "question_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "started_at": "2026-10-02T00:00:00Z"
+}

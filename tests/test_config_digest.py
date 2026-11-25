@@ -187,3 +187,23 @@ def test_changing_the_permitted_axioms_stales_every_basis(research_repo, bound):
     assert stale(root, path) == []
     edit_config(root, 'roots = ["Fixture"]', AXIOMS)
     assert stale(root, path) == [f"{bound} (trusted ref)"]
+
+
+def test_rules_digest_enforces_external_kernels_minimum_even_when_disabled_in_toml(research_repo):
+    """T0: setting [lean] external_kernels = false cannot weaken #verdict-rules, while #verdict preserves the
+    historical distinction between true and false."""
+    from verifylab.config import config_digest, parse_config
+    text_on = (research_repo / "research" / "vl.toml").read_text()
+    text_off = text_on + "\nexternal_kernels = false\n" if "[lean]" in text_on else text_on
+    if "roots = " in text_on and "external_kernels" not in text_on:
+        text_off = text_on.replace('roots = ["Fixture"]', 'roots = ["Fixture"]\nexternal_kernels = false')
+    cfg_on = parse_config(research_repo, text_on)
+    cfg_off = parse_config(research_repo, text_off)
+    assert cfg_on.lean.external_kernels is True and cfg_off.lean.external_kernels is False
+    assert rules_digest(cfg_off) == rules_digest(cfg_on)
+    assert config_digest(VERDICT_INPUT, cfg_off) != config_digest(VERDICT_INPUT, cfg_on)
+    # Planted guard check: if external_minimum=False is passed (as for historical #verdict), disabling external_kernels
+    # changes the rules hash; with external_minimum=True (rules_digest), it cannot.
+    from verifylab import config as cfg_mod
+    assert cfg_mod._rules(cfg_off, external_minimum=False) != cfg_mod._rules(cfg_on, external_minimum=False)
+    assert cfg_mod._rules(cfg_off, external_minimum=True) == cfg_mod._rules(cfg_on, external_minimum=True)

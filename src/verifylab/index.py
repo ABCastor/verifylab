@@ -20,8 +20,9 @@ from . import leanmod
 from .records import RecordError, parse_item
 from .repo import CACHE_DIR, Repo
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 DB_NAME = "index.sqlite"
+INDEX_DISCLAIMER = "locator cache only; never proof, fidelity, or freshness evidence"
 SKIP_DIRS = {".lake", "lake-packages", ".git", "build", "node_modules", "__pycache__"}
 
 _DECL_RE = re.compile(
@@ -160,6 +161,11 @@ def signature(repo: Repo) -> str:
     for file in lean_files(repo):
         st = file.stat()
         entries.append(["lean", _rel(repo, file), st.st_size, st.st_mtime_ns])
+    proj = repo.config.lean.project.strip() or "."
+    manifest = (repo.root / proj / "lake-manifest.json") if proj != "." else (repo.root / "lake-manifest.json")
+    if manifest.is_file():
+        data = manifest.read_bytes()
+        entries.append(["manifest", _rel(repo, manifest), len(data), hashlib.sha1(data).hexdigest()])
     basis = {
         "schema": SCHEMA_VERSION,
         "research_dir": repo.config.research_dir,
@@ -190,6 +196,11 @@ def _fill(repo: Repo, tmp: Path, sig: str, fts: bool) -> None:
                                 statement TEXT, limits TEXT, assumptions TEXT, body TEXT, ref TEXT, haystack TEXT);
             CREATE TABLE decls (name TEXT, kind TEXT, path TEXT, line INTEGER, source TEXT,
                                 name_lower TEXT, source_lower TEXT);
+            CREATE TABLE imported_items (package TEXT, rev TEXT, id TEXT, kind TEXT, title TEXT, path TEXT,
+                                         revision TEXT, statement TEXT, limits TEXT, assumptions TEXT,
+                                         evidence_locator TEXT, review_locator TEXT, haystack TEXT);
+            CREATE TABLE imported_decls (package TEXT, rev TEXT, name TEXT, kind TEXT, path TEXT, line INTEGER,
+                                         source TEXT, name_lower TEXT, source_lower TEXT);
         """)
         if fts:
             con.execute("CREATE VIRTUAL TABLE items_fts USING fts5(id, title, statement, limits, assumptions, body, ref)")
@@ -216,6 +227,24 @@ def _fill(repo: Repo, tmp: Path, sig: str, fts: bool) -> None:
             con.executemany("INSERT INTO decls VALUES (?,?,?,?,?,?,?)",
                             [(n, k, rel, ln, src, n.casefold(), src.casefold()) for n, k, ln, src in scan_lean(text)])
         con.execute("CREATE INDEX decls_name ON decls(name_lower)")
+        from . import imports as vl_imports
+        imp_items, imp_decls = vl_imports.discover_local_package_locators(repo)
+        for row in imp_items:
+            hay = "\n".join((row["package"], row["id"], row["title"], row["statement"], row["limits"],
+                             row["assumptions"], row["path"])).casefold()
+            con.execute(
+                "INSERT INTO imported_items VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (row["package"], row["rev"], row["id"], row["kind"], row["title"], row["path"],
+                 row["revision"], row["statement"], row["limits"], row["assumptions"],
+                 row["evidence_locator"], row["review_locator"], hay),
+            )
+        con.executemany(
+            "INSERT INTO imported_decls VALUES (?,?,?,?,?,?,?,?,?)",
+            [(d["path"].split("@", 1)[0], d["path"].split("@", 1)[1].split(":", 1)[0], d["name"], d["kind"],
+              d["path"], d["line"], d["source"], d["name"].casefold(), d["source"].casefold())
+             for d in imp_decls],
+        )
+        con.execute("CREATE INDEX imported_decls_name ON imported_decls(name_lower)")
         con.executemany("INSERT INTO meta VALUES (?,?)", [
             ("schema", str(SCHEMA_VERSION)), ("signature", sig), ("fts", "1" if fts else "0"),
             ("unparsed_items", str(unparsed)), ("lean_files", str(len(files))),
@@ -282,6 +311,84 @@ class Index:
             (*params, query, f"%.{_escape(query)}", *params, limit)).fetchall()
         return [tuple(r) for r in rows], total
 
+    def search_imported_items(self, text: str, kind: str | None = None) -> list[dict]:
+        """Locator-only search across pinned offline packages' source items, limits and assumptions."""
+        tokens = text.casefold().split() or [text.casefold()]
+        where = " AND ".join("haystack LIKE ? ESCAPE '\\'" for _ in tokens)
+        rows = self.con.execute(
+            f"SELECT package, rev, id, kind, title, path, revision, statement, limits, assumptions, "
+            f"evidence_locator, review_locator FROM imported_items WHERE {where} AND (? IS NULL OR kind = ?) "
+            "ORDER BY package, id",
+            (*[_like(t) for t in tokens], kind, kind),
+        ).fetchall()
+        return [
+            {
+                "package": r[0], "rev": r[1], "id": r[2], "kind": r[3], "title": r[4], "path": r[5],
+                "revision": r[6], "statement": r[7],
+                "limits": [x for x in r[8].splitlines() if x],
+                "assumptions": [x for x in r[9].splitlines() if x],
+                "evidence_locator": r[10] or None, "review_locator": r[11] or None,
+                "locator_only": True, "disclaimer": INDEX_DISCLAIMER,
+            }
+            for r in rows
+        ]
+
+    def search_imported_decls(self, text: str, limit: int) -> tuple[list[dict], int]:
+        """Locator-only search across Lean declarations in resolved pinned packages."""
+        query = text.casefold().strip()
+        tokens = query.split() or [query]
+        hay = "(name_lower || ' ' || source_lower)"
+        where = " AND ".join(f"{hay} LIKE ? ESCAPE '\\'" for _ in tokens)
+        in_name = " AND ".join("name_lower LIKE ? ESCAPE '\\'" for _ in tokens)
+        params = [_like(t) for t in tokens]
+        total = self.con.execute(f"SELECT count(*) FROM imported_decls WHERE {where}", params).fetchone()[0]
+        rows = self.con.execute(
+            f"SELECT package, rev, name, kind, path, line FROM imported_decls WHERE {where} ORDER BY "
+            f"CASE WHEN name_lower = ? THEN 0 WHEN name_lower LIKE ? ESCAPE '\\' THEN 1 "
+            f"WHEN {in_name} THEN 2 ELSE 3 END, length(name), name, path, line LIMIT ?",
+            (*params, query, f"%.{_escape(query)}", *params, limit),
+        ).fetchall()
+        return [
+            {"package": r[0], "rev": r[1], "name": r[2], "kind": r[3], "path": r[4], "line": r[5],
+             "locator_only": True, "disclaimer": INDEX_DISCLAIMER}
+            for r in rows
+        ], total
+
+    def search_limits(self, text: str, limit: int = 20) -> list[dict]:
+        """Locator-only search across item limits and assumptions (local + pinned offline packages)."""
+        tokens = text.casefold().split() or [text.casefold()]
+        where = " AND ".join("(limits || '\n' || assumptions) LIKE ? ESCAPE '\\'" for _ in tokens)
+        params = [_like(t) for t in tokens]
+        local_rows = self.con.execute(
+            f"SELECT id, title, path, limits, assumptions FROM items WHERE {where} ORDER BY id LIMIT ?",
+            (*params, limit),
+        ).fetchall()
+        out = [
+            {
+                "scope": "local", "package": None, "id": r[0], "title": r[1], "path": r[2],
+                "limits": [x for x in r[3].splitlines() if x],
+                "assumptions": [x for x in r[4].splitlines() if x],
+                "locator_only": True, "disclaimer": INDEX_DISCLAIMER,
+            }
+            for r in local_rows
+        ]
+        imp_rows = self.con.execute(
+            f"SELECT package, id, title, path, limits, assumptions, evidence_locator, review_locator "
+            f"FROM imported_items WHERE {where} ORDER BY package, id LIMIT ?",
+            (*params, limit),
+        ).fetchall()
+        out.extend(
+            {
+                "scope": "imported", "package": r[0], "id": r[1], "title": r[2], "path": r[3],
+                "limits": [x for x in r[4].splitlines() if x],
+                "assumptions": [x for x in r[5].splitlines() if x],
+                "evidence_locator": r[6] or None, "review_locator": r[7] or None,
+                "locator_only": True, "disclaimer": INDEX_DISCLAIMER,
+            }
+            for r in imp_rows
+        )
+        return out[:limit]
+
 
 def _check(con: sqlite3.Connection, sig: str) -> str | None:
     """None when the index is usable; otherwise the reason to rebuild."""
@@ -294,6 +401,8 @@ def _check(con: sqlite3.Connection, sig: str) -> str | None:
         return "stale"
     con.execute("SELECT count(*) FROM items").fetchone()
     con.execute("SELECT count(*) FROM decls").fetchone()
+    con.execute("SELECT count(*) FROM imported_items").fetchone()
+    con.execute("SELECT count(*) FROM imported_decls").fetchone()
     return None
 
 

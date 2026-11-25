@@ -4,9 +4,10 @@ and `vl validate`.
 Everything here reads records directly (items, receipts, reviews) and derives status with
 `status.derive`; nothing comes from the index. The order of a card is the order that prevents
 misuse: corrections and retractions first, then limits and assumptions, then the statement (these three as
-committed on the trusted ref, with a differing worktree text set apart as an unreviewed proposal), status, proof
-(kernels, axioms, statement probes) and meaning (fidelity) as two separate facts, evidence, reviews, relations and
-body.
+committed on the trusted ref, with a differing worktree text set apart as an unreviewed proposal), the verdict ladder
+(ladder.py: five separate rows, each `not assessed` until a record assessed it), the derived status, proof (kernels,
+axioms, statement probes) and meaning (fidelity) as two separate facts, evidence, reviews, relations and body. Text for
+people never shows the derived label `verified` as the verdict (`human_label`); `--json` keeps the label.
 """
 
 from __future__ import annotations
@@ -15,9 +16,13 @@ import json
 import re
 from typing import Any
 
+from . import appraisals
+from . import ladder as ladder_rows
+from .ladder import human_label
 from .records import Item
 from .repo import Repo, StoredRecord
-from .status import UNDETERMINED, Status, derive, fidelity, receipt_order, review_order, meaning, meaning_digest
+from .status import (UNDETERMINED, Fidelity, Status, correspondence, derive, fidelity, meaning, meaning_digest,
+                     probe_definitions, reading_size, receipt_order, review_order, unnamed_definitions)
 
 LINK_RE = re.compile(r"\[\[([a-z0-9][a-z0-9-]{1,63})(?:@([0-9a-fA-F]{4,40}))?\]\]")
 RELATIONS = (
@@ -111,12 +116,14 @@ def trust_text(trust: dict[str, Any]) -> str | None:
             "statuses here hold for that ref only")
 
 
-def _review_entry(record: StoredRecord, current_rev: str) -> dict[str, Any]:
+def _review_entry(record: StoredRecord, current_rev: str, repo: Repo, item: Item) -> dict[str, Any]:
     data = record.data
     rev = data.get("item_revision")
     return {
         "path": record.path,
         "kind": data.get("kind"),
+        "review_id": data.get("review_id"),
+        **(appraisals.appraisal_view(repo, item, record) if data.get("kind") == "appraisal" else {}),
         "author": data.get("author"),
         "item_revision": rev,
         "at_current_revision": rev == current_rev,
@@ -150,10 +157,17 @@ def _receipt_entry(repo: Repo, record: StoredRecord, current: Item) -> dict[str,
     }
 
 
+def _foreign_entry(record: StoredRecord) -> dict[str, Any]:
+    data = record.data
+    return {"path": record.path, "machine": record.path.split("/")[2], "adapter": data.get("adapter"),
+            "verdict": data.get("verdict"), "problems": list(record.problems)}
+
+
 _PHASES = ("prepare", "preflight", "isolation_probe", "prebuild_challenge", "comparator_start", "build_challenge",
            "export_challenge", "build_solution", "export_solution_and_compare")
 _LAST_PHASES = ("kernel_lean", "probes")
 LINTS_SHOWN = 10
+FINDINGS_SHOWN = 8       # totalized operations shown per theorem on a card, and in a warning
 
 
 def _timing(receipts: list[StoredRecord]) -> dict[str, Any] | None:
@@ -185,13 +199,13 @@ def timing_text(timing: dict[str, Any]) -> str:
     return line
 
 
-def _fidelity_entry(repo: Repo, item: Item) -> dict[str, Any] | None:
-    state = fidelity(repo, item)
+def _fidelity_entry(state: Fidelity | None) -> dict[str, Any] | None:
     if state is None:
         return None
     return {"label": state.label, "review": state.review, "by": state.by, "self_review": state.self_review,
             "created": state.created, "acknowledges": list(state.acknowledges), "legacy": state.legacy,
-            "unbound": list(state.unbound)}
+            "judgments": [{"by": by, "verdict": verdict} for by, verdict in state.judgments],
+            "unbound": list(state.unbound), "environment_from": state.environment_from}
 
 
 def _proof_entry(status: Status, receipts: list[StoredRecord]) -> dict[str, Any] | None:
@@ -206,7 +220,18 @@ def _proof_entry(status: Status, receipts: list[StoredRecord]) -> dict[str, Any]
     return {"receipt": record.path, "adapter": data.get("adapter"), "assurance": data.get("assurance"),
             "verdict": data.get("verdict"), "kernels": checked.get("kernels"),
             "permitted_axioms": checked.get("permitted_axioms"), "probes": checked.get("probes"),
-            "probe_run": checked.get("probe_run"), "lints": checked.get("lints")}
+            "probe_run": checked.get("probe_run"), "lints": checked.get("lints"),
+            **({"kernel_results": checked["kernel_results"]} if isinstance(checked.get("kernel_results"), dict)
+               else {})}
+
+
+def _definitions_entry(proof: dict[str, Any] | None, state: Fidelity | None) -> dict[str, Any] | None:
+    """The in-project definitions the target's statement depends on, by the statement probes of the receipt the proof
+    rests on, and those no fidelity review of the current meaning names (ADR 0010). None without probes."""
+    if proof is None or not isinstance(proof.get("probes"), dict):
+        return None
+    names = probe_definitions({"checked": {"probes": proof["probes"]}})
+    return {"names": names, "not_named": unnamed_definitions(names, state.texts if state is not None else ())}
 
 
 def fidelity_text(entry: dict[str, Any] | None) -> str | None:
@@ -220,6 +245,9 @@ def fidelity_text(entry: dict[str, Any] | None) -> str | None:
                  "claim, the limits or the assumptions; review again]")
     elif entry.get("unbound"):
         text += f" [older review: it does not bind the {' or the '.join(entry['unbound'])}; review again]"
+    if entry.get("environment_from"):
+        text += (f" [older review: semantic environment inferred from commit {entry['environment_from'][:12]}, "
+                 "which added it]")
     return text
 
 
@@ -248,6 +276,30 @@ def prose_edits(trusted: Item | None, item: Item) -> list[str]:
     return [name for name in BOUND_PROSE if then[name] != now[name]]
 
 
+def declared(table: dict[str, Any]) -> dict[str, Any] | None:
+    """A `[provenance]` or `[origin]` table as the item declares it (null when absent); lists copied, keys sorted."""
+    return {k: list(v) if isinstance(v, list) else v for k, v in sorted(table.items())} or None
+
+
+def provenance_lines(d: dict[str, Any]) -> list[str]:
+    """What the item says about where its statement comes from and who made it. Declared, never checked."""
+    lines = []
+    p, o = d["statement_provenance"], d["origin"]
+    if p:
+        lines.append(f"statement: {p['kind']}" + (f", source {p['source']}" if p.get("source") else ""))
+    if o:
+        made = [o["agent"]]
+        if o.get("model"):
+            made.append(f"model {o['model']}")
+        if "tokens" in o:
+            made.append(f"{o['tokens']} tokens")
+        lines.append("made by " + ", ".join(made))
+        for key, label in (("context", "context given"), ("from", "from"), ("inspired_by", "inspired by")):
+            if o.get(key):
+                lines.append(f"{label}: " + (", ".join(o[key]) if isinstance(o[key], list) else o[key]))
+    return lines
+
+
 def card_data(ctx: Context, item: Item, note: str | None = None) -> dict[str, Any]:
     """The full card as data. `note` is a loud message about which revision is shown. The statement, limits and
     assumptions are those of the item as committed on the trusted ref, the text its status and fidelity hold for
@@ -266,7 +318,7 @@ def card_data(ctx: Context, item: Item, note: str | None = None) -> dict[str, An
         proposed = {"label": PROPOSAL if item.revision == current_rev else OLDER_REVISION,
                     "revision": item.revision, "fields": edited, **{name: shown[name] for name in edited}}
     reviews = sorted(repo.reviews(item.id), key=review_order)
-    entries = [_review_entry(r, current_rev) for r in reviews]
+    entries = [_review_entry(r, current_rev, repo, ctx.items.get(item.id, item)) for r in reviews]
     receipts = sorted(repo.receipts(item.id), key=receipt_order, reverse=True)
 
     relations: dict[str, list[dict[str, Any]]] = {}
@@ -289,9 +341,22 @@ def card_data(ctx: Context, item: Item, note: str | None = None) -> dict[str, An
     relations["linked from"] = [{"id": i, "status": ctx.label(i)} for i in ctx.linked_from.get(item.id, [])]
 
     current_meaning = meaning(repo, basis)
+    proof = _proof_entry(status, receipts)
+    latest = ctx.items.get(item.id, item)
+    fid = fidelity(repo, latest)
+    receipt_entries = [_receipt_entry(repo, r, latest) for r in receipts]
+    proof_receipt = next((e for e in receipt_entries if proof and e["path"] == proof["receipt"]), None)
+    corresponds = correspondence(repo, latest)
+    if basis.imports:
+        from . import imports as vl_imports
+        imp_commit = repo.trusted_commit if trusted is not None else None
+        imp_entries, imp_errors, imp_warnings = vl_imports.inspect_item_imports(repo, basis, commit=imp_commit)
+    else:
+        imp_entries, imp_errors, imp_warnings = [], [], []
     return {
         "meaning": current_meaning,
         "meaning_digest": meaning_digest(current_meaning) if current_meaning is not None else None,
+        "reading_size": reading_size(repo, basis),
         "id": item.id,
         "title": item.title,
         "kind": item.kind,
@@ -305,8 +370,12 @@ def card_data(ctx: Context, item: Item, note: str | None = None) -> dict[str, An
         "kind_note": KIND_NOTES.get(item.kind),
         "status": {"label": status.label, "notes": list(status.notes), "receipt": status.receipt},
         "trust": trust_data(repo),
-        "fidelity": _fidelity_entry(repo, ctx.items.get(item.id, item)),
-        "proof": _proof_entry(status, receipts),
+        "fidelity": _fidelity_entry(fid),
+        "correspondence": corresponds,
+        "ladder": ladder_rows.rows(proof, proof_receipt, _fidelity_entry(fid), corresponds,
+                                   foundations=names_foundations(proof, basis.lean)),
+        "proof": proof,
+        "definitions": _definitions_entry(proof, fid),
         "corrections": [e for e in entries if e["kind"] in CORRECTION_KINDS],
         "refuted_by": relations["refuted by"],
         "superseded_by": relations["superseded by"],
@@ -318,7 +387,13 @@ def card_data(ctx: Context, item: Item, note: str | None = None) -> dict[str, An
         "access": item.access,
         "lean": _plain(item.lean),
         "python": _plain(item.python),
-        "receipts": [_receipt_entry(repo, r, ctx.items.get(item.id, item)) for r in receipts],
+        "imports": imp_entries,
+        "import_errors": imp_errors,
+        "import_warnings": imp_warnings,
+        "statement_provenance": declared(item.provenance),
+        "origin": declared(item.origin),
+        "receipts": receipt_entries,
+        "foreign_receipts": [_foreign_entry(r) for r in repo.foreign_receipts(item.id)],
         "timing": _timing(receipts),
         "reviews": [e for e in entries if e["kind"] not in CORRECTION_KINDS],
         "relations": relations,
@@ -350,6 +425,45 @@ def _review_line(e: dict[str, Any]) -> str:
     return line
 
 
+def appraisal_lines(d: dict[str, Any], *, details: bool = False) -> list[str]:
+    """Keep each author's judgment and its basis visible; never manufacture consensus."""
+    if d.get("appraisals_omitted"):
+        return [f"{d['appraisals_omitted']} appraisals omitted by request (--no-appraisals)"]
+    lines = []
+    for e in d["reviews"]:
+        if e["kind"] != "appraisal":
+            continue
+        if e["problems"]:
+            lines.append(_review_line(e))
+            continue
+        a = e["assessment"]
+        applicability = e["applicability"]
+        grades = ", ".join(f"{k}={v.get('value', v.get('score', v.get('abstention', 'unknown')))}"
+                           for k, v in sorted(a["ratings"].items()))
+        lines.append(f"- {e['author']}: {grades} [{applicability['state']}; "
+                     f"{'admitted' if e['admitted'] else 'NOT admitted'}; {e['review_id'][:16]}]")
+        lines.append(f"  subject: {a['subject']}; goal: {a['basis'].get('goal') or 'not specified'}")
+        lines.append(f"  record: {e['path']}; created: {e['created']}")
+        lines.append(f"  input context: {a['basis']['input_context']}")
+        if a['basis']['files']:
+            lines.append("  bound context files: " + ", ".join(sorted(a['basis']['files'])))
+        if e["text"]:
+            lines.append(f"  judgment: {e['text']}")
+        if applicability["reasons"]:
+            lines.append("  basis: " + "; ".join(applicability["reasons"]))
+        if a.get("provenance"):
+            lines.append("  producer: " + "; ".join(f"{k}={v}" for k, v in sorted(a["provenance"].items())))
+        for source in a.get("sources", []):
+            lines.append(f"  source: {source['locator']}" + (f" ({source['access']})" if source.get("access") else "")
+                         + (f": {source['note']}" if source.get("note") else ""))
+        if a.get("review_references"):
+            lines.append("  related reviews (not settled by this judgment): " + ", ".join(a["review_references"]))
+        if details:
+            lines.append("  assessment (original structured contribution and basis): "
+                         + json.dumps(a, ensure_ascii=False, sort_keys=True))
+    return lines
+
+
 def _receipt_line(e: dict[str, Any]) -> str:
     name = e["path"].rsplit("/", 1)[-1]
     if e["problems"]:
@@ -362,6 +476,14 @@ def _receipt_line(e: dict[str, Any]) -> str:
     if e["verdict"] != "pass" and e["reasons"]:
         line += f" — {'; '.join(map(str, e['reasons']))}"
     return line
+
+
+def _foreign_line(e: dict[str, Any]) -> str:
+    name = e["path"].rsplit("/", 1)[-1]
+    if e["problems"]:
+        return f"{name}: REJECTED foreign receipt from {e['machine']} ({'; '.join(e['problems'])})"
+    return (f"{name}: foreign, not counted until vl replay (from machine {e['machine']}: "
+            f"{e['adapter']} protected {e['verdict']})")
 
 
 def _checked_line(e: dict[str, Any], limit: int = 240) -> str | None:
@@ -384,7 +506,7 @@ def _statement_lines(d: dict[str, Any]) -> list[str]:
     if d["statement"]:
         lines.append(d["statement"].strip())
     if d["ref"]:
-        lines.append(f"source: {d['ref']} (access: {d['access']})")
+        lines.append(f"source: {d['ref']}" + (f" (access: {d['access']})" if d["access"] else ""))
     for name in ("lean", "python"):
         line = _table_line(name, d[name])
         if line:
@@ -409,12 +531,34 @@ def _proposed_lines(d: dict[str, Any]) -> list[str]:
 
 def _status_lines(d: dict[str, Any]) -> list[str]:
     status = d["status"]
-    lines = [status["label"] + (f" (from {status['receipt']})" if status["receipt"] else "")]
+    label = human_label(status["label"])
+    lines = [label + (f" (derived label `{status['label']}`, kept for compatibility; not a verdict, see the ladder)"
+                      if label != status["label"] else "")
+             + (f" (from {status['receipt']})" if status["receipt"] else "")]
     anchor = trust_text(d["trust"]) if "trust" in d else None
     if anchor:
         lines.append(f"- {anchor}")
     lines += [f"- {n}" for n in status["notes"]]
     return lines
+
+
+def finding_text(finding: dict[str, Any], key: str) -> str:
+    """A statement-probe finding (a totalized `term`, a foundations `const`): the name, why, and where it occurs."""
+    where = finding.get("in")
+    return (f"`{finding.get(key)}` ({finding.get('why')})"
+            + ("" if where == "statement" else f" in definition {where}"))
+
+
+def boundary_text(hit: dict[str, Any]) -> str:
+    at = f"{hit.get('binder')} = {hit.get('value')}"
+    if hit.get("vacuous_by"):
+        return f"at {at} `{hit['vacuous_by']}` refutes its hypotheses"
+    return f"at {at} `{hit.get('trivial_by')}` closes it"
+
+
+def _dicts(value: Any) -> list[dict]:
+    """The objects of a probe list; a sealed receipt's probe fields are not validated, so any other shape is none."""
+    return [x for x in value if isinstance(x, dict)] if isinstance(value, list) else []
 
 
 def _probe_line(name: str, entry: Any, witnesses: list[Any]) -> str:
@@ -437,7 +581,31 @@ def _probe_line(name: str, entry: Any, witnesses: list[Any]) -> str:
     if isinstance(hyps, int):
         parts.append(f"{hyps} Prop hypothes{'is' if hyps == 1 else 'es'}"
                      + (", not refuted" if hyps and not skipped and not entry.get("vacuous_by") else ""))
-    return f"- {name}: " + "; ".join(parts)
+    lines = [f"- {name}: " + "; ".join(parts)]
+    hits = _dicts(entry.get("boundary"))
+    if hits:
+        lines.append("  boundary values: " + "; ".join(boundary_text(b) for b in hits))
+    found = _dicts(entry.get("totalized"))
+    lines += [f"  totalized: {finding_text(x, 'term')}" for x in found[:FINDINGS_SHOWN]]
+    if len(found) > FINDINGS_SHOWN:
+        lines.append(f"  totalized: … {len(found) - FINDINGS_SHOWN} more in the receipt")
+    roots = _dicts(entry.get("foundations"))
+    lines += [f"  foundations: {finding_text(x, 'const')}" for x in roots[:FINDINGS_SHOWN]]
+    if len(roots) > FINDINGS_SHOWN:
+        lines.append(f"  foundations: … {len(roots) - FINDINGS_SHOWN} more in the receipt")
+    limit = entry.get("limit_reached")
+    if isinstance(limit, dict) and limit.get("totalized"):
+        lines.append("  totalized: the scan stopped early (heartbeat limit or error); the list may be incomplete")
+    return "\n".join(lines)
+
+
+def names_foundations(proof: dict[str, Any] | None, lean: dict[str, Any]) -> bool:
+    """Whether the probes of the proof's receipt found set-theoretic foundations in a target theorem (witnesses
+    excepted, as `vl validate` does): the axiom list then says little."""
+    probes = (proof or {}).get("probes")
+    witnesses = lean.get("witnesses") if isinstance(lean.get("witnesses"), list) else []
+    return isinstance(probes, dict) and any(isinstance(e, dict) and e.get("foundations") for n, e in probes.items()
+                                            if n not in witnesses)
 
 
 def _proof_lines(d: dict[str, Any]) -> list[str]:
@@ -451,14 +619,20 @@ def _proof_lines(d: dict[str, Any]) -> list[str]:
         head += f" · axioms within {', '.join(map(str, proof['permitted_axioms'])) or 'none'}"
     lines = [head]
     probes, run = proof.get("probes"), proof.get("probe_run") or {}
+    witnesses = d["lean"].get("witnesses") if isinstance(d["lean"].get("witnesses"), list) else []
+    if names_foundations(proof, d["lean"]):
+        lines.append("the axiom list is uninformative here: the target names set-theoretic foundations and Lean always "
+                     "admits Classical.choice; a specialist fidelity review is asked (foundations below)")
     if isinstance(probes, dict):
         tactics = len(run.get("battery") or [])
         lines.append(f"statement probes ({tactics} tactic{'' if tactics == 1 else 's'}, "
                      f"{run.get('heartbeats_per_attempt')} heartbeats per attempt):")
         lines.append("vacuity scope: inconsistency of top-level Prop hypotheses; definition adequacy needs review")
-        witnesses = d["lean"].get("witnesses") if isinstance(d["lean"].get("witnesses"), list) else []
         lines += [_probe_line(name, entry, witnesses) for name, entry in sorted(probes.items())]
         lines += [f"- probe problem: {p}" for p in run.get("problems") or []]
+        if run.get("boundary_unfinished"):
+            lines.append("- boundary values not probed (the run ended first): "
+                         + ", ".join(map(str, run["boundary_unfinished"])))
     elif run.get("skipped"):
         lines.append(f"statement probes skipped: {run['skipped']}")
     elif proof["adapter"] == "lean-comparator" and proof["verdict"] == "pass":
@@ -474,26 +648,76 @@ def _proof_lines(d: dict[str, Any]) -> list[str]:
     return lines
 
 
+def reading_size_text(rs: dict[str, Any]) -> str:
+    """Compact human rendering of a trusted-reading size record (`status.reading_size`)."""
+    base = f"{rs['files']} file(s), {rs['lines']} line(s), {rs['bytes']} B"
+    if rs.get("omissions"):
+        return f"{base} (omissions: {'; '.join(rs['omissions'])})"
+    return base
+
+
 def _meaning_lines(d: dict[str, Any]) -> list[str]:
     fid = d.get("fidelity")
+    lines: list[str]
     if fid is None:
-        return ["no target or evaluator to review"]
-    line = f"fidelity: {fidelity_text(fid)}"
-    if fid.get("created"):
-        line += f" on {fid['created']}"
-    lines = [line + (f" ({fid['review']})" if fid.get("review") else "")]
-    if fid.get("acknowledges"):
-        lines.append(f"probe findings acknowledged by a review of the current target: {', '.join(fid['acknowledges'])}")
+        lines = ["no target or evaluator to review"]
+    else:
+        line = f"fidelity: {fidelity_text(fid)}"
+        if fid.get("created"):
+            line += f" on {fid['created']}"
+        lines = [line + (f" ({fid['review']})" if fid.get("review") else "")]
+        if fid.get("acknowledges"):
+            lines.append(f"probe findings acknowledged by a review of the current target: {', '.join(fid['acknowledges'])}")
+        adequacy = d.get("definitions")
+        if adequacy and adequacy["names"]:
+            lines.append("definition adequacy (Comparator checks that these are the trusted definitions, not that they "
+                         "mean what the question asks; a fidelity review answers for each, by name): "
+                         + ", ".join(adequacy["names"]))
+            if adequacy["not_named"]:
+                lines.append("- not named by any fidelity review of the current meaning: " + ", ".join(adequacy["not_named"]))
+    if rs := d.get("reading_size"):
+        lines.append(f"trusted reading: {reading_size_text(rs)} (informative only, never a verdict)")
+    return lines
+
+
+def _import_lines(d: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    for entry in d.get("imports") or []:
+        manifest = entry.get("manifest") or {}
+        rev = str(manifest.get("rev") or "")[:12] or "unpinned"
+        sub = f" ({manifest['subDir']})" if manifest.get("subDir") else ""
+        head = (
+            f"- {entry['package']}@{rev}{sub} :: {entry['item']}@{str(entry['item_revision'])[:12]} "
+            f"[{entry['module']}: {', '.join(entry['theorems'])}]"
+        )
+        lines.append(head)
+        if entry.get("resolved"):
+            fid = entry.get("source_fidelity") or {}
+            lines.append(
+                f"  source proof: {entry['source_status']} (receipt {entry['receipt'][:16]}) · "
+                f"source fidelity: {fid.get('label')} (review {entry['fidelity_review'][:16]})"
+            )
+            if entry.get("source_limits"):
+                lines.append("  source limits: " + "; ".join(entry["source_limits"]))
+            if entry.get("source_assumptions"):
+                lines.append("  source assumptions: " + "; ".join(entry["source_assumptions"]))
+            if entry.get("source_corrections"):
+                lines.append(f"  source corrections/retractions: {len(entry['source_corrections'])}")
+            lines.append(f"  qualification: {entry['qualification']}")
+        else:
+            lines.append(f"  UNRESOLVED: {entry.get('error')}")
+    for w in d.get("import_warnings") or []:
+        lines.append(f"! warning: {w}")
     return lines
 
 
 def _correction_lines(d: dict[str, Any]) -> list[str]:
     lines = [f"! {_review_line(e)}" for e in d["corrections"]]
-    lines += [f"! refuted by {r['id']} ({r['status']})" if r.get("admitted", True) else
-              f"~ refutation proposed by {r['id']} ({r['status']}): in the worktree only, not on the trusted ref"
+    lines += [f"! refuted by {r['id']} ({human_label(r['status'])})" if r.get("admitted", True) else
+              f"~ refutation proposed by {r['id']} ({human_label(r['status'])}): in the worktree only, not on the trusted ref"
               for r in d["refuted_by"]]
-    lines += [f"! superseded by {r['id']} ({r['status']})" for r in d["superseded_by"] if r["status"] == "verified"]
-    lines += [f"~ proposed successor {r['id']} ({r['status']}): not a replacement until verified"
+    lines += [f"! superseded by {r['id']} ({human_label(r['status'])})" for r in d["superseded_by"] if r["status"] == "verified"]
+    lines += [f"~ proposed successor {r['id']} ({human_label(r['status'])}): not a replacement until check passed"
               for r in d["superseded_by"] if r["status"] != "verified"]
     return lines
 
@@ -508,13 +732,13 @@ def header(d: dict[str, Any]) -> str:
     flags = ", ".join(f"{n} {name}" for n, name in counts if n)
     warn = f"; READ FIRST: {flags}" if flags else ""
     fid = d.get("fidelity")
-    fid_text = f"; fidelity: {fid['label']}" + (" (self-review)" if fid["self_review"] else "") if fid else ""
+    self_review = "; fidelity review is a self-review" if fid and fid["self_review"] else ""
     trust = d.get("trust")
     anchor = (f" under trusted ref {trust['ref']} ({trust['source']})" if trust and not trust["configured"] else "")
     proposed = d.get("proposed")
     edit = f"; {proposed['label']}: {', '.join(proposed['fields'])}" if proposed else ""
-    return (f"{d['id']}@{short(d['revision'])} — {d['title']} [{kind}; status: {d['status']['label']}{anchor}"
-            f"{fid_text}{edit}{warn}]")
+    return (f"{d['id']}@{short(d['revision'])} — {d['title']} [{kind}; status: {human_label(d['status']['label'])}"
+            f"{anchor}; ladder: {ladder_rows.summary(d['ladder'])}{self_review}{edit}{warn}]")
 
 
 def _indent(lines: list[str], prefix: str = "  ") -> list[str]:
@@ -541,35 +765,43 @@ def render_card(d: dict[str, Any]) -> str:
     if d.get("proposed"):
         section("PROPOSED (not on the trusted ref)" if d["proposed"]["label"] == PROPOSAL
                 else "TEXT OF THE REVISION ASKED FOR", _proposed_lines(d), "")
-    section("STATUS (derived from receipts and reviews)", _status_lines(d), "")
+    section("VERDICT LADDER (five separate facts; none implies another)", ladder_rows.lines(d["ladder"]), "")
+    section("STATUS (derived from receipts and reviews; a summary, not a verdict)", _status_lines(d), "")
     section("PROOF (kernels, axioms, statement probes)", _proof_lines(d), "")
     section("MEANING (does the target say what the question asks?)", _meaning_lines(d), "")
+    if d.get("imports") or d.get("import_errors"):
+        section("IMPORTS (source status and fidelity kept separate from consumer; lineage only, pending N3)",
+                _import_lines(d), "none")
     receipt_lines = []
     for e in d["receipts"]:
         receipt_lines.append(f"- {_receipt_line(e)}")
         checked = _checked_line(e)
         if checked:
             receipt_lines.append(f"  {checked}")
+    receipt_lines += [f"- {_foreign_line(e)}" for e in d["foreign_receipts"]]
     if d.get("timing"):
         receipt_lines.append(timing_text(d["timing"]))
     section("EVIDENCE (receipts, newest first)", receipt_lines, "no receipts")
+    if any(e["kind"] == "appraisal" for e in d["reviews"]) or d.get("appraisals_omitted"):
+        section("APPRAISALS (contextual judgments; never proof status)", appraisal_lines(d, details=True), "none")
     section("REVIEWS",
-            [f"- {_review_line(e)}" for e in d["reviews"]], "none")
+            [f"- {_review_line(e)}" for e in d["reviews"] if e["kind"] != "appraisal"], "none")
     rel_lines = []
     for name, entries in d["relations"].items():
         if not entries:
             continue
         shown = []
         for e in entries:
-            text = f"{e['id']} ({e['status']})"
+            text = f"{e['id']} ({human_label(e['status'])})"
             if e.get("pinned_revision"):
-                text = f"{e['id']}@{e['pinned_revision']} ({e['status']}"
+                text = f"{e['id']}@{e['pinned_revision']} ({human_label(e['status'])}"
                 text += ", pin is NOT the current revision)" if e.get("pin_is_current") is False else ")"
             if e.get("admitted") is False:
                 text += " [proposed: not on the trusted ref]"
             shown.append(text)
         rel_lines.append(f"{name}: {', '.join(shown)}")
     section("RELATIONS", rel_lines, "none")
+    section("PROVENANCE (declared by the author, not checked)", provenance_lines(d), "not declared")
     section("BODY", [d["body"].strip()] if d["body"].strip() else [], "(empty)")
     return "\n".join(out)
 
@@ -579,7 +811,7 @@ def render_card(d: dict[str, Any]) -> str:
 
 def brief_sections(d: dict[str, Any]) -> list[tuple[str, str]]:
     """(name, text) in priority order: corrections, limits, assumptions, statement, the unreviewed proposal (only
-    when the shown revision's prose differs from the trusted text), status, proof, meaning, evidence, body."""
+    when the shown revision's prose differs from the trusted text), ladder, status, proof, meaning, evidence, body."""
 
     def block(name: str, lines: list[str], empty: str) -> str:
         if not lines:
@@ -591,7 +823,7 @@ def brief_sections(d: dict[str, Any]) -> list[tuple[str, str]]:
         head += f"\nNOTE: {d['revision_note']}"
     if d["kind_note"]:
         head += f"\nNOTE: {d['kind_note']}"
-    evidence = [_receipt_line(e) for e in d["receipts"]]
+    evidence = [*map(_receipt_line, d["receipts"]), *map(_foreign_line, d["foreign_receipts"])]
     proposed = [("proposed", block("proposed", _proposed_lines(d), ""))] if d.get("proposed") else []
     return [
         ("header", head),
@@ -600,9 +832,19 @@ def brief_sections(d: dict[str, Any]) -> list[tuple[str, str]]:
         ("assumptions", block("assumptions", [f"- {x}" for x in d["assumptions"]], "none stated")),
         ("statement", block("statement", _statement_lines(d), "")),
         *proposed,
+        ("ladder", block("ladder", ladder_rows.lines(d["ladder"]), "")),
         ("status", block("status", _status_lines(d), "")),
         ("proof", block("proof", _proof_lines(d), "")),
         ("meaning", block("meaning", _meaning_lines(d), "")),
+        *([("imports", block("imports", _import_lines(d), "none"))]
+          if d.get("imports") or d.get("import_errors") else []),
+        *([("appraisals", block("appraisals", appraisal_lines(d), "none"))]
+          if any(e["kind"] == "appraisal" for e in d["reviews"]) or d.get("appraisals_omitted") else []),
+        *([("reviews", block("reviews", [_review_line(e) for e in d["reviews"] if e["kind"] != "appraisal"], "none"))]
+          if any(e["kind"] != "appraisal" for e in d["reviews"]) else []),
+        *([("relations", block("relations", [f"{name}: " + ", ".join(e["id"] for e in entries)
+                                            for name, entries in d["relations"].items() if entries], "none"))]
+          if any(d["relations"].values()) else []),
         ("evidence", block("evidence", [f"- {x}" for x in evidence], "no receipts")),
         ("body", block("body", [d["body"].strip()] if d["body"].strip() else [], "(empty)")),
     ]
@@ -684,8 +926,8 @@ def render_brief(cards: list[dict[str, Any]], budget: int) -> tuple[str, list[di
     source's `ref` and a `[[link]]` stay pointers, and no file they name is ever read into a brief.
 
     Each step keeps one more unit (a line) of the item whose next unit has the highest priority
-    (corrections, then limits, assumptions, statement, proposal, status, proof, meaning, evidence, body; ties in the
-    order the ids were given). A unit that does not fit is retried after any other item grows, because a growing
+    (corrections, then limits, assumptions, statement, proposal, ladder, status, proof, meaning, evidence, body; ties
+    in the order the ids were given). A unit that does not fit is retried after any other item grows, because a growing
     item's truncation marker shrinks. So a later section of one item is only kept when an earlier
     section of another no longer fits at all. Every item keeps its header, which names its status and
     counts its corrections, and every cut item ends with a loud marker.
@@ -733,14 +975,14 @@ def impact_data(ctx: Context, item_id: str) -> dict[str, Any]:
 
 
 def render_impact(d: dict[str, Any]) -> str:
-    out = [f"IMPACT of {d['id']} ({d['status']}): what must be re-examined if it changes or is corrected"]
+    out = [f"IMPACT of {d['id']} ({human_label(d['status'])}): what must be re-examined if it changes or is corrected"]
     anchor = trust_text(d["trust"])
     if anchor:
         out.append(f"NOTE: {anchor}")
     out.append(f"items that use it, directly or transitively ({len(d['users'])}):")
     for u in d["users"]:
         how = "directly" if u["direct"] else f"via {u['via']}"
-        out.append(f"  - {u['id']} ({u['status']}) {how}")
+        out.append(f"  - {u['id']} ({human_label(u['status'])}) {how}")
     if not d["users"]:
         out.append("  none")
     out.append(f"explanations that cite it or a dependent ({len(d['explanations'])}):")
@@ -750,7 +992,7 @@ def render_impact(d: dict[str, Any]) -> str:
             what.append("cites " + ", ".join(e["cites"]))
         if e["links"]:
             what.append("links " + ", ".join(e["links"]))
-        out.append(f"  - {e['id']} ({e['status']}) {'; '.join(what)}")
+        out.append(f"  - {e['id']} ({human_label(e['status'])}) {'; '.join(what)}")
     if not d["explanations"]:
         out.append("  none")
     return "\n".join(out)

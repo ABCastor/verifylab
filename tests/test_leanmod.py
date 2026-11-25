@@ -163,6 +163,7 @@ def test_target_problems():
 @pytest.mark.parametrize("text", [
     "namespace A\ntheorem t : True := sorry\n",          # never closed
     "namespace A\ntheorem t : True := sorry\nend B\n",   # wrong end
+    "module\npublic section\nnamespace A\ntheorem t : True := sorry\nend A\n",  # no section end
     "end A\n",
 ])
 def test_scope_problems_fail_closed(text):

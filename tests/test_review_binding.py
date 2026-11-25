@@ -126,13 +126,12 @@ def test_invalid_environment_binds_raw_bytes_and_diagnostic(research_repo, filen
     assert meaning_digest(basis(root)) != meaning_digest(before)
 
 
-@pytest.mark.parametrize("narrow", ["environment", "target-only"])
-def test_historical_narrow_review_is_readable_stale_and_renewable(research_repo, monkeypatch, capsys, narrow):
-    root = research_repo
-    target(root)
+def admit_historical_review(root, narrow, read=None):
+    """A fidelity review as earlier vl versions wrote it: without the semantic environment, or binding only the target;
+    `read` is the trusted commit it says it read."""
     current = basis(root)
     fields = dict(item="add-zero", item_revision=git(root, "hash-object", "research/items/add-zero.md").strip(),
-                  kind="fidelity", author="agent:old", text="older scope", verdict="faithful",
+                  **({"trusted_ref": "trusted", "trusted_commit": read} if read else {}), kind="fidelity", author="agent:old", text="older scope", verdict="faithful",
                   created="2026-10-01T12:00:00+00:00", target_path="research/targets/t.lean",
                   target_sha256=current["files"]["research/targets/t.lean"])
     if narrow == "environment":
@@ -141,11 +140,119 @@ def test_historical_narrow_review_is_readable_stale_and_renewable(research_repo,
     record = seal_review(fields)
     write_new_json(root / "research/reviews/add-zero" / (record["review_id"][:16] + ".json"), record)
     commit_all(root, "admit historical review")
+    return git(root, "rev-parse", "HEAD").strip()
+
+
+def test_historical_target_only_review_is_readable_stale_and_renewable(research_repo, monkeypatch, capsys):
+    root = research_repo
+    target(root)
+    admit_historical_review(root, "target-only")
     assert Repo.open(root).reviews("add-zero")[0].problems == ()
     assert state(root).label == "review stale: semantic environment not bound; review again"
     monkeypatch.chdir(root)
     review_and_admit(root, capsys)
     assert state(root).label == "faithful"
+
+
+def test_review_without_environment_binds_that_of_the_commit_that_added_it(research_repo, monkeypatch, capsys):
+    root = research_repo
+    target(root)
+    commit = admit_historical_review(root, "environment")
+    # Control: nothing changed since the commit that added the review; its environment is the one now.
+    current = state(root)
+    assert current.label == "faithful" and current.environment_from == commit and current.unbound == ()
+    monkeypatch.chdir(root)
+    assert main(["show", "add-zero"]) == 0
+    assert f"semantic environment inferred from commit {commit[:12]}" in capsys.readouterr().out
+    # Planted: the environment changes after that commit.
+    (root / "lean-toolchain").write_text("leanprover/lean4:v4.99.0\n")
+    commit_all(root, "change environment after the review")
+    assert state(root).label == "review stale: semantic environment changed since review"
+    review_and_admit(root, capsys)
+    assert state(root).label == "faithful" and state(root).environment_from is None
+
+
+def test_the_environment_of_an_older_review_is_read_once_per_commit(research_repo, monkeypatch):
+    """A card, a validation and a catalog row each ask the fidelity of an item; the environment of the commit that
+    added an older review does not change, so it is read from git once."""
+    from verifylab import status
+    root = research_repo
+    target(root)
+    admit_historical_review(root, "environment")
+    reads = []
+    real = status.semantic_environment
+    monkeypatch.setattr(status, "semantic_environment", lambda repo, commit=None: reads.append(commit) or real(
+        repo, commit))
+    assert state(root).label == state(root).label == "faithful"
+    assert len([c for c in reads if c is not None]) == 1
+
+
+def test_with_environment_inference_unguarded_a_later_environment_change_keeps_review(research_repo, monkeypatch):
+    from verifylab import status
+    root = research_repo
+    target(root)
+    admit_historical_review(root, "environment")
+    (root / "lean-toolchain").write_text("leanprover/lean4:v4.99.0\n")
+    commit_all(root, "change environment after the review")
+    original = status.semantic_environment
+    monkeypatch.setattr(status, "semantic_environment", lambda repo, commit=None: original(repo))
+    assert state(root).label == "faithful"
+
+
+@pytest.mark.parametrize("read_before_toolchain", [True, False])
+def test_the_commit_a_review_says_it_read_must_have_the_same_environment(research_repo, read_before_toolchain):
+    root = research_repo
+    target(root)
+    before = git(root, "rev-parse", "HEAD").strip()
+    (root / "lean-toolchain").write_text("leanprover/lean4:v4.99.0\n")
+    commit_all(root, "admit toolchain")
+    after = git(root, "rev-parse", "HEAD").strip()
+    # Planted: the reviewer read the commit before the toolchain; the review was committed after it.
+    admit_historical_review(root, "environment", read=before if read_before_toolchain else after)
+    assert state(root).label == ("review stale: semantic environment not bound; review again" if read_before_toolchain
+                                 else "faithful")
+
+
+def test_every_commit_that_added_a_review_must_have_the_same_environment(research_repo, monkeypatch):
+    from verifylab import gitref
+    root = research_repo
+    target(root)
+    first = admit_historical_review(root, "environment")
+    path = next((root / "research/reviews/add-zero").glob("*.json"))
+    record = path.read_bytes()
+    path.unlink()
+    commit_all(root, "withdraw the review")
+    (root / "lean-toolchain").write_text("leanprover/lean4:v4.99.0\n")
+    commit_all(root, "change environment")
+    path.write_bytes(record)
+    commit_all(root, "admit the review again")
+    # Planted: the commit that added it again has today's environment; the one that first added it did not.
+    assert state(root).label == "review stale: semantic environment not bound; review again"
+    original = gitref.added
+    monkeypatch.setattr(gitref, "added", lambda *a: {p: c[:1] for p, c in original(*a).items()})   # the guard, off
+    assert state(root).label == "faithful" and state(root).environment_from != first
+
+
+def test_a_review_naming_a_commit_not_in_the_repository_infers_nothing(research_repo):
+    root = research_repo
+    target(root)
+    admit_historical_review(root, "environment", read="0" * 40)
+    assert state(root).label == "review stale: semantic environment not bound; review again"
+
+
+def test_shallow_clone_infers_no_environment(research_repo, tmp_path):
+    root = research_repo
+    target(root)
+    admit_historical_review(root, "environment")
+    (root / "lean-toolchain").write_text("leanprover/lean4:v4.99.0\n")
+    commit_all(root, "change environment after the review")
+    git(root, "commit", "-q", "--allow-empty", "-m", "a later commit")
+    clone = tmp_path / "shallow"
+    git(tmp_path, "clone", "-q", "--depth", "1", "--branch", "trusted", f"file://{root}", str(clone))
+    git(clone, "config", "vl.trustedRef", "trusted")
+    # Its boundary commit would seem to add the review in today's environment.
+    assert state(clone).label == "review stale: semantic environment not bound; review again"
+    assert state(root).label == "review stale: semantic environment changed since review"
 
 
 def test_show_digest_and_dry_run_are_read_only_discovery(research_repo, monkeypatch, capsys):
@@ -243,7 +350,7 @@ def test_with_environment_guard_disabled_a_changed_toolchain_keeps_review(resear
     target(root)
     monkeypatch.chdir(root)
     original = status.semantic_environment(Repo.open(root))
-    monkeypatch.setattr(status, "semantic_environment", lambda _: original)
+    monkeypatch.setattr(status, "semantic_environment", lambda *_: original)
     review_and_admit(root, capsys)
     (root / "lean-toolchain").write_text("different toolchain\n")
     commit_all(root, "change environment with guard disabled")

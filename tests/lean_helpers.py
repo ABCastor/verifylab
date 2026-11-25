@@ -25,7 +25,8 @@ from verifylab.adapters.base import CheckOutcome, CheckRequest
 from verifylab.adapters.lean_comparator import TOOLS, LeanComparatorAdapter, toolchain_dir
 from verifylab.repo import Repo
 
-FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "lean-planted"
+# VL_TEST_FIXTURE: a copy of the fixture on another Lean toolchain (its lean-toolchain file), to run these tests there.
+FIXTURE = Path(os.environ.get("VL_TEST_FIXTURE") or Path(__file__).resolve().parents[1] / "fixtures" / "lean-planted")
 CASES = FIXTURE / "cases"
 TOOLCHAIN = (FIXTURE / "lean-toolchain").read_text(encoding="utf-8").strip()
 
@@ -55,6 +56,14 @@ def _discover() -> dict[str, Path]:
 TOOL_PATHS = _discover()
 
 
+def _built_for_fixture(mathlib: Path) -> bool:
+    """Whether this Mathlib checkout is on the fixture's toolchain: one built for another is incomplete to Lake."""
+    try:
+        return (mathlib / "lean-toolchain").read_text(encoding="utf-8").strip() == TOOLCHAIN
+    except OSError:
+        return False
+
+
 def _mathlib() -> tuple[Path | None, Path | None]:
     """(packages folder, lake-manifest.json) of a project with a built Mathlib, or (None, None)."""
     projects = [Path(os.environ["VL_TEST_MATHLIB"])] if os.environ.get("VL_TEST_MATHLIB") else []
@@ -62,7 +71,7 @@ def _mathlib() -> tuple[Path | None, Path | None]:
     candidates = [(p / ".lake" / "packages", p / "lake-manifest.json") for p in projects]
     candidates += [(lake / "packages", project / "lake-manifest.json") for project, lake in caches.items()]
     for packages, manifest in candidates:
-        if (packages / "mathlib").is_dir() and manifest.is_file():
+        if (packages / "mathlib").is_dir() and manifest.is_file() and _built_for_fixture(packages / "mathlib"):
             return packages, manifest
     return None, None
 
@@ -257,8 +266,9 @@ class ScopePeakMemory:
     def _poll(self) -> None:
         base = f"/sys/fs/cgroup/user.slice/user-{os.getuid()}.slice/user@{os.getuid()}.service"
         while not self._stop.is_set():
-            units = (glob.glob(f"{base}/vl.slice/run-*.scope") + glob.glob(f"{base}/app.slice/run-*.scope")
-                     + glob.glob(f"{base}/vl.slice/run-*.service"))
+            units = (glob.glob(f"{base}/vl.slice/**/run-*.scope", recursive=True)
+                     + glob.glob(f"{base}/app.slice/run-*.scope")
+                     + glob.glob(f"{base}/vl.slice/**/run-*.service", recursive=True))
             for scope in units:
                 try:
                     pids = Path(scope, "cgroup.procs").read_text().split()

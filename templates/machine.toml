@@ -22,6 +22,42 @@
 # Memory cap of all vl runs together on this machine (systemd MemoryMax of the slice vl.slice they share).
 # Default: 70% of physical RAM.
 # memory_total = "20G"
+# Protected Lean checks (ADR 0005) keep Lake's build products of the trusted side (the target and the project modules it imports)
+# in ~/.local/share/verifylab/lean-builds/ and reuse them in later checks; false builds them anew every time.
+# build_cache = true
+# Off by default (ADR 0008): keep what the solution side of a protected check compiled, untrusted, in
+# ~/.local/share/verifylab/lean-solution-builds/, under the digest of every input of that build, and mount it read-only
+# in a later check of exactly the same inputs. The kernels still replay it; the receipt names the entry.
+# Audit projects (many challenges, one workspace) set it to true.
+# reuse_solution_builds = false
+
+[sandbox]
+# What this computer is (ADR 0012, proposed). "workstation" (default): a package of lake-manifest.json outside the
+# trusted ref's [lean] trusted_packages (default: Mathlib and its official dependencies) makes `vl check`,
+# `vl lane new` and `vl import` unsupported. "disposable" lets them run, and receipts record the class: say it only
+# in a purpose-built VM, fresh for each batch, with no credentials but a write-only results channel, destroyed afterwards.
+# class = "workstation"
+
+[machine]
+# Who this computer is, for receipts that travel between your machines (ADR 0015, proposed). The name is recorded in
+# every receipt this machine writes and in the bundle of `vl receipts export`; `trust` says how other machines class
+# these receipts: "own" (default) lets an integrator import them as counted-once-admitted, "foreign" only as
+# quarantined until `vl replay` reproduces them.
+# name = "worker-a"
+# trust = "own"
+
+[queue]
+# The job queue of every heavy run on this machine: `vl check`, `vl lane exec` and `vl queue run -- CMD` start only
+# when a slot is free, their reservations fit memory_total, and MemAvailable stays above keep_free; else they wait.
+# A check reserves the largest memory peak of the item's 5 newest admitted or exploratory receipts; a first check
+# the largest of its checker's receipts in the repository, else default_reservation.
+# threads = 4                    # CPUs one check may use: Lean's and Lake's worker threads (LEAN_NUM_THREADS) and
+#                                # the CPU quota of the check's slice; default 4, at most the number of CPUs
+# slots = 3                      # jobs at once; default: the number of CPUs divided by threads
+# keep_free = "3G"               # memory the queue never plans to use; default 3G
+# default_reservation = "2G"     # default 2G
+# max_wait = 3600                # seconds a job waits before it gives up (exit 2); default: no limit
+# `vl queue status --explain` prints each of these and whether this file, a flag or the default set it.
 
 [launchers]
 # System programs vl starts, by absolute path: bwrap, systemd-run, systemctl, env, stdbuf, sh, git. Default: the

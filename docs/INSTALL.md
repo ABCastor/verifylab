@@ -2,21 +2,41 @@
 
 VerifyLab runs locally on Linux with Python 3.11 or later and Git. Protected Python checks need a system
 Python interpreter and bubblewrap. Protected Lean checks additionally need an installed Lean toolchain,
-Comparator, lean4export, landrun and nanoda, and a working systemd user manager with
-`RestrictAddressFamilies` support. VerifyLab itself downloads nothing.
+a working systemd user manager with
+`RestrictAddressFamilies` support and four verifier tools:
+
+- Comparator checks the fixed target and verifies the candidate's proof and allowed axioms.
+- lean4export exports the Lean declarations the kernels replay.
+- landrun applies Linux Landlock file restrictions to Comparator's child processes.
+- nanoda is the independent Lean kernel used for the second check.
+
+VerifyLab itself downloads nothing.
 
 ## Install the command
 
-From a checkout of this repository:
+From the VerifyLab checkout, with `uv`, Git and Python 3.11 or later:
 
 ```sh
 uv tool install .
+export PATH="$(uv tool dir --bin):$PATH"
 vl --help
 ```
 
-Install `uv` using your system's package manager or its official distribution. Agent skills are optional;
-their Markdown files ship with the wheel. Install the seven `skills/vl-*` directories according to your
-harness's instructions. No particular model or harness is required.
+Install `uv` using your system's package manager or its official distribution. The `export` applies to the
+current shell. Use `uv tool update-shell` and start a new shell to keep the tool directory on PATH.
+
+Run the installed `vl` from the mathematics repository. From that repository, a VerifyLab checkout also works
+without a tool install:
+
+```sh
+uv run --project /absolute/path/to/verifylab vl attempts check
+```
+
+The versioned `verifylab` entry skill ships with the wheel. Run `vl init --skills codex` for
+`~/.codex/skills`, `vl init --skills claude` for `~/.claude/skills`, or `vl init --skills PATH` with Pi's
+skill directory. With no target it uses `~/.agents/skills`. Open a new harness session after installation. The installed skill is that folder alone; the
+documents it names as `docs/NAME.md` ship with the wheel too, and `vl docs NAME` prints one. No particular model
+or harness is required.
 
 ## Linux isolation
 
@@ -49,23 +69,31 @@ policy before running the jail. Do not change a shared machine's policy merely t
 ## Build the tested Lean verifier stack
 
 Install elan, Go 1.24 or later, a recent Rust toolchain with Cargo, and a C compiler. The release's fixture
-uses `leanprover/lean4:v4.34.0-rc2`. Install that exact toolchain explicitly:
+uses `leanprover/lean4:v4.34.0-rc2`; `leanprover/lean4:v4.34.1` is also reviewed. Install the toolchain explicitly:
 
 ```sh
 elan toolchain install leanprover/lean4:v4.34.0-rc2
 uv sync --frozen
 scripts/install-tools.sh "$HOME/.cache/verifylab/tool-build"
+# another reviewed toolchain, built in its own directory (each store is per toolchain):
+elan toolchain install leanprover/lean4:v4.34.1
+scripts/install-tools.sh --toolchain leanprover/lean4:v4.34.1 "$HOME/.cache/verifylab/tool-build-4.34.1"
 ```
 
-The script clones and builds these immutable source revisions, then invokes `vl init --tools` to copy and
-hash-pin the resulting binaries outside the repository:
+Without `--toolchain` the script uses the fixture's. The script clones and builds these immutable source
+revisions, then invokes `vl init --tools` to copy and hash-pin the resulting binaries outside the repository:
 
-| Tool | Source revision |
+| Tool | Source revision (v4.34.0-rc2 and v4.34.1) |
 |---|---|
 | Comparator | `19e111e2141cf333c7daff0f64c5f24acc91dd2e` |
 | lean4export | `cacf989bd75f608700820f6afc595f32e7a99a4d` |
 | landrun | `811cfff51ceaf3d9843708aa6d22e9b84ccac8b4` |
 | nanoda | `4c544ed4099c8227f07d5de77ad1e69fb0740a27` |
+
+The Comparator and lean4export revisions above declare `v4.34.0-rc2` but build with the v4.34.1 `lake` and pass
+the planted Lean suite on a v4.34.1 copy of the fixture (`VL_TEST_FIXTURE`, below). landrun and nanoda
+do not depend on Lean. The script reads each toolchain's pins from its `case` table; a toolchain without a case is
+refused until its pins are reviewed.
 
 Installing tools downloads sources and Go/Cargo build dependencies. It does not publish research or send
 project artifacts. `SOURCE-REVISIONS` in the build directory records source revisions and compiler versions.
@@ -86,8 +114,8 @@ scripts/install-tools.sh --offline "$HOME/.cache/verifylab/tool-build"
 Protected checks ignore caller-supplied `COMPARATOR_*`, `PATH` and `ELAN_HOME` when choosing Lean verifier
 tools. Custom tool locations in the machine's `[tools]` table take precedence over the store. Receipt tool
 hashes describe the tools used for that check; replacing installed tools does not invalidate historical
-evidence automatically. Moving to another Lean toolchain requires testing compatible Comparator/exporter
-revisions and the known-answer cases together; this script deliberately refuses an unreviewed toolchain change.
+evidence automatically. Adding a Lean toolchain requires testing compatible Comparator/exporter revisions and the
+known-answer cases together (the planted suite on a copy of the fixture); the script refuses an unreviewed toolchain.
 
 ## Verify a checkout and its installed package
 
@@ -101,11 +129,20 @@ python scripts/smoke-wheel.py dist/*.whl
 
 The full gate refuses failed or deselected tests, and by default skipped Lean/jail tests. The documented
 `VL_GATE_ALLOW_SKIP=1` escape does not establish protected test coverage and must not be used for release verification. It requires a built Mathlib dependency
-cache for its read-only-cache integration test, in addition to the core Lean fixture and the twenty vendored
-Comparator cases. Point `VL_TEST_MATHLIB` at a Lake project whose `.lake/packages/mathlib` is built and whose
+cache for its read-only-cache integration test, in addition to the core Lean fixture and the vendored
+Comparator cases. The Tiny foreign-project patch trial requires the Lean 4.34.1 toolchain preinstalled. Point `VL_TEST_MATHLIB` at a Lake project whose `.lake/packages/mathlib` is built and whose
 manifest pins Mathlib `85e3a25e006c35636f0e53b0e9296caca2685bc0`. The workflow contains the exact project/cache
 setup; `Mathlib.Data.Finset.Card` and its imports suffice for this integration test. Preparing this cache
-downloads dependencies and trusted upstream build artifacts; checks themselves never download them.
+downloads dependencies and trusted upstream build artifacts; checks themselves never download them. The cache
+must be built on the fixture's toolchain; the test skips a Mathlib whose `lean-toolchain` differs. A cache filled
+by `lake exe cache get` alone lacks `proofwidgets/widget/package-lock.json.hash`; Lake then replays `npm install` in
+the read-only jail and the check ends in `error`. A `lake build` of the project with writable packages writes the file
+(it runs `npm install`); complete a fresh cache that way before its first check.
+
+To run the Lean tests on another reviewed toolchain, copy `fixtures/lean-planted` (with `cases/`), set the copy's
+`lean-toolchain`, install that toolchain and its tools (above), and point `VL_TEST_FIXTURE` at the copy:
+`VL_TEST_FIXTURE=/tmp/lean-planted-4.34.1 uv run pytest tests/test_lean_adapter.py`. The tools come from that
+toolchain's store. This is a check for the toolchain, not part of `scripts/gate`.
 
 The installed-wheel smoke test installs the wheel in an isolated environment and exercises the protected
 Python check, receipt admission and derived status through the installed command. Public CI runs fast tests

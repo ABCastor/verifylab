@@ -1,0 +1,14 @@
+[project]
+name = "replay-fixture"
+
+[lean]
+project = "."
+roots = ["ReplayFixture"]
+permitted_axioms = ["propext", "Quot.sound", "Classical.choice"]
+
+[lanes]
+dir = "../.vl-lanes"
+max_parallel = 3
+
+[check]
+memory_max = "16G"

@@ -33,7 +33,8 @@ command. Run the fast suite before a commit and the full gate before closing a b
 
 - Status is derived from admitted records, never assigned by a caller. Protected checks read the question from
   the trusted ref and the answer from the worktree; exploratory checks never verify a result.
-- Receipts are written by `vl check`. Receipts and reviews are immutable: corrections use new records, rather
+- Receipts are written by `vl check` (and by `vl replay` of a foreign receipt, ADR 0015, proposed); `vl receipts import`
+  copies them whole. Receipts and reviews are immutable: corrections use new records, rather
   than edits to saved evidence.
 - Formal validity, statement fidelity, understanding and strategic usefulness are separate facts. Reviews are
   attributed judgements; an author string or approval flag does not authenticate identity.

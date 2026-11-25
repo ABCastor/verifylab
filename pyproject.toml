@@ -1,10 +1,10 @@
 [project]
 name = "verifylab"
-version = "0.1.0"
-description = "Minimal research toolkit for LLM agents: trusted targets, receipts, reviews, lanes."
+version = "0.2.0"
+description = "Purpose, forecasts, pinned source reading and check evidence for formal mathematics."
 readme = "README.md"
 license = "Apache-2.0"
-license-files = ["LICENSE", "NOTICE", "fixtures/comparator-known/LICENSE", "fixtures/comparator-known/NOTICE"]
+license-files = ["LICENSE", "fixtures/comparator-known/LICENSE", "fixtures/comparator-known/NOTICE"]
 authors = [{ name = "Edoardo Avenia" }]
 requires-python = ">=3.11"
 dependencies = []
@@ -22,6 +22,7 @@ packages = ["src/verifylab"]
 [tool.hatch.build.targets.wheel.force-include]
 "templates" = "verifylab/templates"
 "skills" = "verifylab/skills"
+"docs" = "verifylab/docs"
 
 [dependency-groups]
 dev = ["pytest>=8"]

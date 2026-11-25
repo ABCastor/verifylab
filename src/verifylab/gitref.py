@@ -9,6 +9,7 @@ A read of a commit is either the file's bytes, a certain "no such file" (the com
 an admitted retraction or failure that cannot be read must not let an older pass count. Git is started by absolute path (never
 from the caller's PATH), without the caller's GIT_* variables (which redirect the repository, its objects or its
 index) and with `--no-replace-objects`, so a local `git replace` cannot swap the trusted commit for another.
+Every process also disables fsmonitor and hooks: candidate-controlled configuration must not launch host callbacks.
 
 Blobs are read through one `git cat-file --batch` process per repository, kept for the whole command: a command
 that reads a thousand records starts one git process for them, not a thousand. An object that the process reports
@@ -18,6 +19,7 @@ missing, or a process that ends or answers out of step, is a GitError, and the n
 from __future__ import annotations
 
 import atexit
+import bisect
 import functools
 import os
 import re
@@ -32,6 +34,12 @@ class GitError(RuntimeError):
 
 
 _FULL_SHA = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+SAFE_CONFIG = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null")
+
+
+def is_full_sha(text: str) -> bool:
+    """Whether the whole text is a full SHA-1 or SHA-256 object name in lower case."""
+    return _FULL_SHA.fullmatch(text) is not None
 
 
 def environment() -> dict[str, str]:
@@ -53,8 +61,8 @@ def program() -> str:
 
 
 def git(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[bytes]:
-    """`git -C root ARGS` by absolute path, with the sanitized environment and replacement objects ignored."""
-    proc = subprocess.run([program(), "--no-replace-objects", "-C", str(root), *args], capture_output=True,
+    """`git -C root ARGS` by absolute path, without environment redirection, replacement objects or callbacks."""
+    proc = subprocess.run([program(), "--no-replace-objects", *SAFE_CONFIG, "-C", str(root), *args], capture_output=True,
                           env=environment())
     if check and proc.returncode != 0:
         raise GitError(f"git {' '.join(args)}: {proc.stderr.decode(errors='replace').strip()}")
@@ -77,6 +85,13 @@ def toplevel(path: Path) -> Path:
 
 def rev_parse(root: Path, ref: str) -> str:
     return _git(root, "rev-parse", "--verify", f"{_rev(ref)}^{{commit}}").stdout.decode().strip()
+
+
+def is_branch(root: Path, ref: str, branch: str | None) -> bool:
+    if branch is None:
+        return False
+    named = git(root, "rev-parse", "--symbolic-full-name", _rev(ref), check=False)
+    return named.stdout.decode().strip() == f"refs/heads/{branch}"
 
 
 def ref_exists(root: Path, ref: str) -> bool:
@@ -112,7 +127,7 @@ class _Reader:
     def __init__(self, root: str):
         self.errors = tempfile.TemporaryFile()
         self.lock = threading.Lock()
-        self.proc = subprocess.Popen([program(), "--no-replace-objects", "-C", root, "cat-file", "--batch"],
+        self.proc = subprocess.Popen([program(), "--no-replace-objects", *SAFE_CONFIG, "-C", root, "cat-file", "--batch"],
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.errors,
                                      env=environment())
 
@@ -194,10 +209,41 @@ def _fields(out: bytes) -> list[bytes]:
     return fields[:-1] if fields and not fields[-1] else fields
 
 
+@functools.lru_cache(maxsize=64)
+def _sorted_paths(root: str, commit: str) -> tuple[str, ...]:
+    """Every path of `commit`'s tree, sorted once: the paths under a folder are then one contiguous slice."""
+    return tuple(sorted(_tree(root, commit)))
+
+
 def ls_files(root: Path, ref: str, prefix: str) -> list[str]:
     """Paths at `ref` under the folder `prefix` (or equal to it); GitError when `ref` cannot be read."""
+    commit = _commit(root, _rev(ref))
+    paths = _sorted_paths(str(root), commit)
+    if not prefix:
+        return list(paths)
     folder = prefix.rstrip("/") + "/"
-    return sorted(p for p in _tree(str(root), _commit(root, _rev(ref))) if p.startswith(folder) or p == prefix)
+    start = bisect.bisect_left(paths, folder)
+    end = bisect.bisect_left(paths, folder[:-1] + chr(ord("/") + 1), start)    # "/" + 1 is "0": past the folder
+    return ([prefix] if prefix in _tree(str(root), commit) else []) + list(paths[start:end])
+
+
+@functools.lru_cache(maxsize=8)
+def added(root: str, commit: str, prefix: str) -> dict[str, tuple[str, ...]]:
+    """path -> the commits in `commit`'s history that added or changed it (newest first), for every file under the
+    folder `prefix`. Empty in a shallow repository, whose boundary commit would seem to add every file."""
+    if _git(Path(root), "rev-parse", "--is-shallow-repository").stdout.strip() != b"false":
+        return {}
+    out = _git(Path(root), "log", "-z", "--root", "--no-renames", "--no-show-signature", "--diff-filter=AM",
+               "--name-only", "--format=%H", _rev(commit), "--", prefix.rstrip("/") + "/").stdout
+    commits: dict[str, tuple[str, ...]] = {}
+    current = ""
+    for field in _fields(out):
+        name = os.fsdecode(field.lstrip(b"\n"))
+        if _FULL_SHA.match(name):       # a commit; a path under `prefix` has a '/'
+            current = name
+        elif name:
+            commits[name] = commits.get(name, ()) + (current,)
+    return commits
 
 
 def tracked_files(root: Path, prefix: str) -> list[str]:
@@ -246,6 +292,11 @@ def blob(root: Path, prefix: str) -> tuple[str | None, bytes | None]:
     """Full sha and content of the blob a (possibly abbreviated) sha names, if it is unique."""
     if not prefix or prefix.startswith("-"):
         return None, None
+    if is_full_sha(prefix):          # a full name: read through the batch reader, no process per blob
+        try:
+            return prefix, _reader(str(root)).read(prefix)
+        except GitError:             # missing, or not a blob: the slow path below says which
+            pass
     proc = _git(root, "rev-parse", "--verify", "--quiet", f"{prefix}^{{blob}}", check=False)
     if proc.returncode != 0:
         return None, None

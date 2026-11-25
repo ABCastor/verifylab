@@ -53,6 +53,31 @@ def test_dirty_and_ignored_paths_return_unquoted_paths(tmp_path):
     assert gitref.ignored_paths(root) == ["build/ä b.olean"]
 
 
+def test_git_disables_fsmonitor_and_hooks_from_repository_config(tmp_path):
+    root = _repo(tmp_path)
+    marker = tmp_path / "outside-marker"
+    script = tmp_path / "callback"
+    script.write_text(f"#!/bin/sh\ntouch '{marker}'\n")
+    script.chmod(0o755)
+    git(root, "config", "core.fsmonitor", str(script))
+    assert gitref.dirty_paths(root) == set()
+    assert not marker.exists()
+    # Prove the planted callback can execute when the command override is absent.
+    git(root, "status", "--porcelain")
+    assert marker.exists()
+    marker.unlink()
+    git(root, "config", "core.fsmonitor", "false")
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    (hooks / "pre-commit").write_bytes(script.read_bytes())
+    (hooks / "pre-commit").chmod(0o755)
+    git(root, "config", "core.hooksPath", str(hooks))
+    gitref.git(root, "commit", "--allow-empty", "-qm", "clean control")
+    assert not marker.exists()
+    git(root, "commit", "--allow-empty", "-qm", "unguarded control")
+    assert marker.exists()
+
+
 def test_a_revision_starting_with_a_dash_is_refused_never_read_as_an_option(tmp_path):
     import pytest
     root = _repo(tmp_path)
@@ -126,3 +151,67 @@ def test_a_failed_batch_read_is_an_error_and_the_next_read_starts_afresh(tmp_pat
     loose.unlink()
     with pytest.raises(gitref.GitError):
         gitref.show(root, "trusted", "b.txt")                   # missing: an error, never an absent file
+
+
+def test_is_full_sha_accepts_only_a_whole_sha1_or_sha256_in_lower_case():
+    assert gitref.is_full_sha("a" * 40) and gitref.is_full_sha("0123456789abcdef" * 4)
+    for text in ("a" * 39, "a" * 41, "A" * 40, "a" * 40 + "\n", "a" * 39 + "g", "", "HEAD"):
+        assert not gitref.is_full_sha(text), repr(text)
+
+
+def test_ls_files_lists_a_folder_and_nothing_beside_it(tmp_path):
+    """The folder's paths come from one sorted index of the tree: names that sort just before or after the folder
+    (`items-old`, `items0`, `items.md`) are not in it, a nested folder is, and a file named like the prefix is."""
+    root = _repo(tmp_path)
+    for name in ("r/items/a.md", "r/items/sub/b.md", "r/items-old/c.md", "r/items0/d.md", "r/items.md", "r/item"):
+        _write(root, name)
+    commit_all(root, "tree")
+    assert gitref.ls_files(root, "trusted", "r/items") == ["r/items/a.md", "r/items/sub/b.md"]
+    assert gitref.ls_files(root, "trusted", "r/items/") == ["r/items/a.md", "r/items/sub/b.md"]
+    assert gitref.ls_files(root, "trusted", "r/item") == ["r/item"]
+    assert gitref.ls_files(root, "trusted", "r/nothing") == []
+
+
+def test_a_blob_named_by_its_full_sha_is_read_without_a_git_process_each(tmp_path, monkeypatch):
+    import subprocess
+    root = _repo(tmp_path)
+    for k in range(6):
+        _write(root, f"f{k}.txt", f"content {k}\n")
+    commit_all(root, "files")
+    shas = [git(root, "rev-parse", f"trusted:f{k}.txt").strip() for k in range(6)]
+    gitref.close_readers()
+    started, real = [], subprocess.Popen
+
+    def counting(args, *a, **kw):
+        started.append([str(x) for x in args])
+        return real(args, *a, **kw)
+    monkeypatch.setattr(subprocess, "Popen", counting)
+    assert [gitref.blob(root, sha) for sha in shas] == [(sha, f"content {k}\n".encode()) for k, sha in enumerate(shas)]
+    assert [s[s.index("cat-file"):] for s in started] == [["cat-file", "--batch"]]
+    assert gitref.blob(root, shas[0][:12]) == (shas[0], b"content 0\n")            # abbreviated: the slow path
+    assert gitref.blob(root, "0" * len(shas[0])) == (None, None)                   # missing
+    tree = git(root, "rev-parse", "trusted^{tree}").strip()
+    assert gitref.blob(root, tree) == (None, None)                                 # not a blob
+
+
+def test_a_trusted_input_and_an_item_meaning_are_read_once_per_command(research_repo, monkeypatch):
+    """Receipts share most of their inputs and fidelity, correspondence and the card each ask for the meaning: on a
+    corpus of hundreds of items the second and later reads must cost nothing. The trusted commit does not move
+    within a command, so the first read stands; the result handed out is a copy."""
+    from verifylab import status
+    from verifylab.repo import Repo
+    item_file = research_repo / "research/items/add-zero.md"
+    item_file.write_text(item_file.read_text().replace(
+        "+++\nBody", '\n[lean]\ntarget = "ReceiptFixture.lean"\ntheorems = ["receipt"]\n+++\nBody'))
+    commit_all(research_repo, "a target")
+    monkeypatch.chdir(research_repo)
+    repo = Repo.open()
+    reads, real = [], repo.read_trusted
+    monkeypatch.setattr(repo, "read_trusted", lambda path: reads.append(path) or real(path))
+    assert repo.trusted_digest("Fixture/Basic.lean") == repo.trusted_digest("Fixture/Basic.lean") is not None
+    assert reads == ["Fixture/Basic.lean"]
+    item = repo.trusted_item("add-zero")
+    first = status.meaning(repo, item)
+    count = len(reads)
+    first["files"].clear()
+    assert status.meaning(repo, item)["files"] and len(reads) == count

@@ -34,10 +34,11 @@ def test_solution_class_and_datum_pinning(name, shared_cases, monkeypatch):
     assert outcome.checked["probe_run"]["problems"] == [], explain(outcome)
     probes = outcome.checked["probes"]
     for row in probes.values():
-        assert row == {
+        assert {k: row[k] for k in ("trivial_by", "vacuous_by", "prop_hypotheses", "vacuity_skipped")} == {
             "trivial_by": None, "vacuous_by": None, "prop_hypotheses": 0,
             "vacuity_skipped": "no Prop hypothesis",
         }, probes
+        assert row["definitions"] and all(d.startswith("Fixture.SemanticLimits.") for d in row["definitions"]), probes
     # Persist the actual adapter evidence for diagnosis, without admitting it.
     root = shared_cases.run(name)[1]
     (root.parent / "semantic-limit-outcome.json").write_text(
@@ -83,6 +84,11 @@ def test_nonexistence_check_admit_show_and_validate_keep_evidence_scoped(tmp_pat
         rc, out = vl(*args)
         assert rc == 0 and "premise-vacuity skipped: no Prop hypothesis" in out
         assert "definition adequacy needs review" in out
+    rc, out = vl("export", "catalog", str(tmp_path / "catalog"))
+    assert rc == 0, out
+    catalog = json.loads((tmp_path / "catalog/catalog.json").read_text())
+    probes = catalog["items"][0]["probes"]
+    assert probes["state"] == "skipped" and probes["data_inhabitation"] == "not assessed"
     rc, out = vl("validate")
     assert rc == 0, out
     # A protected pass and a global witness do not supply a meaning judgment.

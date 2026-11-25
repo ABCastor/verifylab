@@ -3,7 +3,7 @@
 Comparator (leanprover/comparator) builds a Challenge module and a Solution module, exports both, and
 checks that (1) every listed theorem has the same statement in both, (2) every declaration the
 statements use is identical in both environments, (3) the solution's proofs use only permitted axioms,
-(4) the kernel (and optionally nanoda) accepts the solution. It assumes the Challenge's whole import
+(4) the required kernels accept the solution. It assumes the Challenge's whole import
 closure and the lakefile are trusted, and that nothing adversarial was compiled before it ran.
 
 In a research repository the candidate controls its worktree, including the definitions a target
@@ -50,8 +50,12 @@ went: Comparator's phases, Lake's per-module build times and job counts, the mem
 
 Statement probes (`lean_probes`): before Comparator, the challenge is built with the same `lake build` under
 the same landrun sandbox Comparator uses, and its build products are copied to a separate probe workspace;
-Comparator then finds the challenge built. After a pass, the probes run on that copy, never on the check
-project, whose `.lake` the candidate's build may have rewritten. They are recorded in `checked.probes`.
+Comparator then finds the challenge built. The probes run on that copy, beside Comparator, never on the check
+project, whose `.lake` the candidate's build may have rewritten; after a pass they are recorded in
+`checked.probes`. The modules that challenge build compiles, all trusted, are reused across protected checks
+through the trusted build store (`lean_build_cache`, ADR 0005): copied in before the build, the missing ones copied out
+after it, before any candidate code is compiled. With `[check] reuse_solution_builds`, the solution side of a check whose
+inputs are exactly those of an earlier one is mounted read-only from that check's stored build (ADR 0008).
 Command lints (`leanlint`) over the Lean files the candidate changed or added are recorded in `checked.lints`.
 
 Lake packages (Mathlib) are reused from an existing packages directory mounted READ-ONLY at its own
@@ -72,17 +76,20 @@ import re
 import secrets
 import shutil
 import subprocess
+import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
-from .. import candidate_exec, gitref, jail, leanlint, leanmod
+from .. import candidate_exec, gitref, jail, leanlint, leanmod, packages
 from ..leanmod import lakefile_options
-from . import lean_probes
+from . import lean_build_cache, lean_probes
 from ..config import CONFIG_PATH, RULES_INPUT, Config, ConfigError, parse_config, rules_digest
-from ..machine import REVISIONS, Machine, MachineError, file_sha256 as machine_file_sha256, load as load_machine
-from ..machine import read_revisions, toolchain_key
+from ..machine import REVISIONS, Machine, MachineError, build_store_root, file_sha256 as machine_file_sha256
+from ..machine import solution_store_root
+from ..machine import load as load_machine, read_revisions, toolchain_key
 from ..records import ASSURANCE, Item, RecordError, parse_item, sha256_hex
 from .base import CheckOutcome, CheckRequest
 
@@ -91,7 +98,8 @@ NAME = "lean-comparator"
 # statement probes, the copy of the challenge build they read, and the command lints, which never decide it.
 VERDICT_GUARDS = frozenset({"trusted_target", "trusted_definitions", "permitted_axioms"})
 PROBE_GUARDS = frozenset({"probe_trivial", "probe_vacuous", "probe_snapshot", "lints"})
-GUARDS = VERDICT_GUARDS | PROBE_GUARDS
+GATE_GUARDS = frozenset({"package_gate"})     # where a check may run, not what it decides (packages.py)
+GUARDS = VERDICT_GUARDS | PROBE_GUARDS | GATE_GUARDS
 CHALLENGE = "VLChallenge"
 SOLUTION = "VLSolution"
 TRUSTED_PREFIX = "VLTrusted"
@@ -380,8 +388,14 @@ def dependency_identity(packages_dir: Path, packages: list[dict[str, Any]], modu
         name = package.get("name")
         folder = packages_dir / str(name)
         head = gitref.head(folder) if (folder / ".git").exists() else None
+        tracked_clean = head is not None and gitref.git(
+            folder, "diff", "--quiet", "--no-ext-diff", "HEAD", "--", check=False).returncode == 0
+        # Lake owns its build directory. Untracked sources count even if a project's ignore rules hide them.
+        extra_sources = head is not None and bool(gitref.git(
+            folder, "ls-files", "--others", "-z", "--", "*.lean", "*.c", "*.cpp", "*.h", "*.toml",
+            ":(exclude).lake/**").stdout)
         revisions[str(name)] = {"head": head, "manifest": package.get("rev"),
-                                "matches": head is not None and head == package.get("rev")}
+                                "matches": tracked_clean and not extra_sources and head == package.get("rev")}
     traces = {}
     for module in modules:
         rel = Path(leanmod.module_to_path(module)).with_suffix(".trace")
@@ -508,19 +522,27 @@ class Classified:
     message: str
     phase: str
     axiom: str | None = None
+    kernel_results: tuple[tuple[str, str], ...] = ()
 
 
 def classify(stdout: str, stderr: str, returncode: int, theorems: tuple[str, ...],
-             kernels: tuple[str, ...] = ("lean",), challenge: str = CHALLENGE, solution: str = SOLUTION) -> Classified:
+             kernels: tuple[str, ...] = ("lean",), challenge: str = CHALLENGE, solution: str = SOLUTION,
+             service: str | None = None) -> Classified:
     """Map Comparator's output to a verdict. Only failures that are certainly the candidate's are
     `fail`; anything else (tool trouble, resource limits, a broken trusted side) is `error`. A pass needs
     every kernel in `kernels` to have printed its acceptance line; a kernel's rejection counts only from Comparator's
-    own lines after the solution's export, and only when Comparator exited normally (a non-zero code below 128)."""
+    own lines after the solution's export, and only when Comparator exited normally (a non-zero code below 128) and
+    the kernel did too. `service`: why systemd, not Comparator, set `returncode` (jail.Streamed.service)."""
     exc = [line[len("uncaught exception: "):].strip() for line in stderr.splitlines()
            if line.startswith("uncaught exception: ")]
     message = exc[-1] if exc else ""
     phase = _phase(stdout)
     phase_text = f"{phase[0]} {phase[1]}" if phase else "start"
+    if service:
+        return Classified("error", f"Comparator's run did not end normally during {phase_text}: {service}{_TOOL}",
+                          message, phase_text)
+    if re.search(r"^(?:uncaught exception: |error: )nanoda exited with 101\s*$", stderr, re.M):
+        return Classified("error", "nanoda exited with 101 (kernel panic)", message, phase_text)
     verdict_lines = _after_export(stdout, solution)
     if returncode == 0 and "Your solution is okay!" in verdict_lines:
         missing = [k for k in kernels if k not in accepted_kernels(verdict_lines)]
@@ -537,11 +559,22 @@ def classify(stdout: str, stderr: str, returncode: int, theorems: tuple[str, ...
         # so no line it or the candidate printed, and no exception text, is a verdict on the solution.
         return Classified("error", f"Comparator failed during {phase_text}: it did not exit normally (exit code "
                           f"{returncode}: a signal, the memory cap or the OOM killer){_TOOL}", message, phase_text)
-    kernel = next((m for line in verdict_lines if (m := re.fullmatch(r"(.*) kernel rejected the solution", line))), None)
-    if (kernel or "Lean default kernel rejects the solution" in verdict_lines
-            or any(line.startswith("Quotient post-check rejects") for line in verdict_lines)):
-        who = kernel.group(1) if kernel else "Lean default"
-        return fail(f"the {who} kernel rejected the solution: {message}")
+    rejected = [m.group(1) for line in verdict_lines if (m := re.fullmatch(r"(.*) kernel rejected the solution", line))]
+    lean_rejected = "Lean default kernel rejects the solution" in verdict_lines
+    if rejected or lean_rejected or any(line.startswith("Quotient post-check rejects") for line in verdict_lines):
+        who = rejected[0] if rejected else "Lean default"
+        # Comparator reports any non-zero exit of an external kernel as a rejection; Lean gives 128 + the signal.
+        if rejected and (code := re.fullmatch(r".+ exited with (\d+)", message)) and int(code.group(1)) >= 128:
+            return Classified("error", f"the {who} kernel was killed by signal {int(code.group(1)) - 128} ({message}): "
+                              f"a crash or a resource limit{_TOOL}", message, phase_text)
+        failures = {"lean" if name == "Lean default" else name for name in rejected}
+        if lean_rejected:
+            failures.add("lean")
+        passes = set(accepted_kernels(verdict_lines))
+        observed = tuple((name, "failed" if name in failures else "passed")
+                         for name in kernels if name in failures or name in passes)
+        return Classified("fail", f"the {who} kernel rejected the solution: {message}", message, phase_text,
+                          kernel_results=observed)
     for pattern, verdict, reason in EXCEPTIONS:
         if m := pattern.fullmatch(message):
             axiom = m.group(1) if pattern.pattern.startswith("Illegal axiom") else None
@@ -550,8 +583,10 @@ def classify(stdout: str, stderr: str, returncode: int, theorems: tuple[str, ...
         diags = _diagnostics(stdout, f"Building {solution}")
         if diags:
             return fail("the solution does not compile: " + " | ".join(diags))
-        return Classified("error", f"building the solution failed without a Lean diagnostic ({message}); "
-                          "resource limit or tool failure", message, phase_text)
+        lake = _diagnostics(stdout, f"Building {solution}", pattern=_ANY_ERROR)   # e.g. lean not started: ENOMEM
+        return Classified("error", f"building the solution failed without a Lean diagnostic ({message})"
+                          + (": " + " | ".join(lake) if lake else "") + "; resource limit or tool failure",
+                          message, phase_text)
     if phase == ("export", solution):
         missing = re.search(r"Constant (\S+) not found in environment", stderr)
         if missing and missing.group(1) in theorems:
@@ -588,10 +623,15 @@ def comparator_config(theorems: tuple[str, ...], axioms: list[str], nanoda: Path
 
 # The jailed Comparator run: the adapter and the known-answer gate (tests/test_comparator_known.py) share it --------
 
-def comparator_jail(workdir: Path, tc_dir: Path, tools: dict[str, Path], packages_dir: Path | None) -> jail.Jail:
+def comparator_jail(workdir: Path, tc_dir: Path, tools: dict[str, Path], packages_dir: Path | None,
+                    threads: int | None = None) -> jail.Jail:
     """bwrap with no network and a scrubbed environment; `workdir` writable, toolchain, tools and Lake packages
-    read-only. Comparator reads landrun and lean4export only from its COMPARATOR_* variables."""
+    read-only. Comparator reads landrun and lean4export only from its COMPARATOR_* variables. With `threads`, Lean and
+    Lake run that many worker threads (LEAN_NUM_THREADS) in every command vl starts there; Comparator does not pass the
+    variable on to the builds it sandboxes, which only the CPU quota of the check's slice bounds (jail.cap_job)."""
     env = jail.filter_env(os.environ, ("LANG", "LC_ALL", "LC_CTYPE"))
+    if threads:
+        env["LEAN_NUM_THREADS"] = str(threads)
     env["PATH"] = f"{tc_dir / 'bin'}:/usr/bin:/bin"
     env["COMPARATOR_LANDRUN"] = str(tools["landrun"])
     env["COMPARATOR_LEAN4EXPORT"] = str(tools["lean4export"])
@@ -632,9 +672,11 @@ class ComparatorRun:
     stderr: str
     lines: tuple[tuple[float, str, str], ...]    # (seconds since start, stream, line), as they arrived
     seconds: float
-    memory_peak: int | None                      # bytes, the memory unit's MemoryPeak
+    memory_peak: int | None                      # bytes, as jail.Streamed.memory_peak
     line_buffered: bool                          # Comparator's stdout reached us line by line (stdbuf -oL)
     command: tuple[str, ...]
+    service: str | None = None                   # why systemd, not Comparator, set `returncode`
+    cpu_seconds: float | None = None             # as jail.Streamed.cpu_seconds
 
 
 def comparator_command(comparator: Path, project: Path, config_path: Path) -> list[str]:
@@ -655,7 +697,8 @@ def run_comparator(box: jail.Jail, comparator: Path, project: Path, config: dict
     command = comparator_command(comparator, project, config_path)
     run = jail.stream(box, command, timeout=timeout, memory_max=memory_max, memory_total=memory_total)
     return ComparatorRun(run.returncode, run.stdout.decode("utf-8", "replace"), run.stderr.decode("utf-8", "replace"),
-                         run.lines, run.seconds, run.memory_peak, "-oL" in command, run.argv)
+                         run.lines, run.seconds, run.memory_peak, "-oL" in command, run.argv, run.service,
+                         run.cpu_seconds)
 
 
 _LAKE_JOB = re.compile(r"^\S \[(\d+)/(\d+)\](?: \(Optional\))? (\w+) (\S+)(?: \((\d+(?:\.\d+)?)(ms|s)\))?$")
@@ -731,9 +774,23 @@ class _Check:
         self.extra: dict[str, Any] = {}
         self.notes: list[str] = []
         self.prebuilt: dict[str, Any] = {"modules": [], "jobs": {}}   # Lake's timings of the challenge pre-build
+        self.peaks: dict[str, int] = {}          # memory peak of each step's unit (`note_peak`, `check_peak`)
+        self.cpu: dict[str, float] = {}          # CPU seconds of each step's units (`note_run`); steps run in threads
+        self.third_party: list[str] = []         # packages outside [lean] trusted_packages that a disposable machine let in
 
     def on(self, guard: str) -> bool:
         return guard not in self.req.guards
+
+    def note_peak(self, step: str, peak: int | None) -> None:
+        if peak is not None:
+            self.peaks[step] = max(peak, self.peaks.get(step, 0))
+
+    def note_run(self, step: str, run: Any) -> None:
+        """What a finished (or timed-out) unit of `step` held: its memory peak, and its CPU seconds, which add up over
+        all the units whether they overlapped or not."""
+        self.note_peak(step, getattr(run, "memory_peak", None))
+        if (cpu := getattr(run, "cpu_seconds", None)) is not None:
+            self.cpu[step] = self.cpu.get(step, 0.0) + cpu
 
     def remaining(self, what: str) -> float:
         """Seconds left of the check's timeout, the one budget every step runs under; none left stops the check."""
@@ -846,6 +903,24 @@ class _Check:
             raise _Stop("error", f"[lean] project '{project}' must be a path inside the repository")
         return (lambda p: p) if norm == "." else (lambda p: f"{norm}/{p}")
 
+    def package_gate(self, prel: Callable[[str], str]) -> None:
+        """Stop with `unsupported`, before anything is read or built, when the project's manifest lists a package
+        outside `[lean] trusted_packages` (from the trusted ref, never the worktree) and this machine is not
+        disposable (packages.py, ADR 0012, proposed). An exploratory check builds from the worktree's manifest, so that
+        one is gated too."""
+        if not self.on("package_gate"):
+            return
+        rel = prel(packages.MANIFEST)
+        try:
+            loaded = load_machine()
+        except MachineError as exc:
+            raise _Stop("error", f"machine configuration: {exc}")
+        manifests = [self.read_trusted(rel)] + ([] if self.protected else [self.read_worktree(rel)])
+        names, why = packages.gate(manifests, self.req.repo.config.lean.trusted_packages, loaded)
+        if why:
+            raise _Stop("unsupported", why)
+        self.third_party = names
+
     def run(self) -> CheckOutcome:
         req = self.req
         if req.assurance not in ASSURANCE:
@@ -856,6 +931,7 @@ class _Check:
         config = self.config()
         spec = self.spec(config)
         prel = self.project_rel(config)
+        self.package_gate(prel)
         roots = config.lean.roots
         if not roots:
             raise _Stop("error", "[lean] roots is empty: list the project's top-level module names")
@@ -1000,27 +1076,35 @@ class _Check:
             raise _Stop("unsupported", f"Lean toolchain {toolchain} is not installed at {tc_dir} (vl never downloads)")
         if not jail.available():
             raise _Stop("unsupported", "bubblewrap (bwrap) is not installed; Lean checks run only inside the jail")
+        if self.protected and (why := jail.service_problem()):
+            raise _Stop("unsupported", f"protected Lean checks run in a systemd user service that denies AF_UNIX, and "
+                                       f"this machine cannot start one: {why}")
         tools, sources = self.tools(machine, toolchain, config)
         missing = [n for n in ("comparator", "landrun", "lean4export") if tools[n] is None]
         if missing:
             where = (f"[tools] in {machine.path}, or `vl init --tools`" if self.protected
                      else "[tools] in machine.toml or research/vl.toml, or the COMPARATOR_* variables")
             raise _Stop("unsupported", "tool(s) not found: " + ", ".join(missing) + f" (set them in {where})")
-        use_nanoda = config.lean.external_kernels and tools["nanoda"] is not None
-        if config.lean.external_kernels and not use_nanoda:
-            if self.protected:   # a pass replayed by one kernel where the rules ask for two would not count
+        if self.protected and not config.lean.external_kernels and not (self.req.require_external_kernels or self.req.historical_single_kernel):
+            raise _Stop("unsupported", "protected Lean checks require an external kernel (nanoda); "
+                                       "[lean] external_kernels = false is not permitted for newly issued protected checks")
+        require_external = config.lean.external_kernels or (self.protected and not self.req.historical_single_kernel)
+        use_nanoda = require_external and tools["nanoda"] is not None
+        if require_external and not use_nanoda:
+            if self.protected:   # a pass replayed by one kernel where an external kernel is required would not count
                 raise _Stop("unsupported", "[lean] external_kernels is on, but nanoda, the second kernel, is not "
                                            f"installed on this machine: set [tools] nanoda in {machine.path} or run "
-                                           "`vl init --tools --nanoda PATH`, or set external_kernels = false on the "
-                                           "trusted ref to check with the Lean kernel only")
+                                           "`vl init --tools --nanoda PATH`")
             self.notes.append("external_kernels is on but nanoda is not resolvable; only the Lean kernel was used")
         used_tools = {n: p for n, p in tools.items() if p is not None and (n != "nanoda" or use_nanoda)}
         self.environment = {
             "toolchain": toolchain,
             "toolchain_dir": str(tc_dir),
             "lean_version": _lean_version(tc_dir),
+            "build_tools": {name: file_sha256(tc_dir / "bin" / name) for name in ("lean", "lake")},
             "tools": {n: {"path": str(p), "sha256": file_sha256(p), **sources.get(n, {})} for n, p in used_tools.items()},
             "machine_config": machine.record(),
+            **({"third_party_packages": self.third_party} if self.third_party else {}),
         }
 
         # Lake packages: reused read-only, never downloaded.
@@ -1102,27 +1186,158 @@ class _Check:
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(data)
 
-        # Jail, isolation probe, Comparator.
-        box = replace(comparator_jail(scratch, tc_dir, used_tools, packages_dir), deny_unix=self.protected)
-        mark = time.monotonic()
-        phases = {"prepare": round(mark - self.started, 2)}
+        # Jail, isolation probe, challenge build, Comparator. Two steps run beside the others, each reading trusted
+        # files only: the dependency preflight beside the isolation probe and the challenge build, the statement
+        # probes beside Comparator (their result is recorded after a pass only). The check's runs share the CPUs and
+        # memory of its job's slice (jail.cap_job); the probes give way there, and run again alone after a pass when
+        # the run beside Comparator did not finish.
+        box = replace(comparator_jail(scratch, tc_dir, used_tools, packages_dir, req.threads),
+                      deny_unix=self.protected)
+        phases = {"prepare": round(time.monotonic() - self.started, 2)}
         self.extra["phases"] = phases
         dependencies = sorted(m for m in trusted_external if not (tc_dir / "lib" / "lean" / f"{m.split('.')[0]}.olean").is_file())
         if packages_dir is not None:
-            self.environment["packages"]["identity"] = dependency_identity(packages_dir, packages, dependencies)
-        if packages_dir is not None and dependencies:
-            lakefile_deps = render_lakefile(packages_dir, requires, {}, [])
-            self.preflight(box, scratch / "preflight", toolchain, lakefile_deps, manifest, packages_dir, dependencies)
-            phases["preflight"] = round(time.monotonic() - mark, 2)
-            mark = time.monotonic()
-        self.check_isolation(box, used_tools["landrun"])
-        phases["isolation_probe"] = round(time.monotonic() - mark, 2)
-        probe_dir = None
-        if self.on("probe_snapshot"):
-            mark = time.monotonic()
-            probe_dir = self.prebuild_challenge(box, project, tc_dir, used_tools["landrun"], scratch / "probe")
-            phases["prebuild_challenge"] = round(time.monotonic() - mark, 2)
+            identity = dependency_identity(packages_dir, packages, dependencies)
+            self.environment["packages"]["identity"] = identity
+            mismatched = [name for name, info in identity["revisions"].items() if not info["matches"]]
+            if self.protected and mismatched:
+                raise _Stop("error", "package sources differ from their manifest pins: " + ", ".join(mismatched))
+        challenge_sources = {CHALLENGE: challenge_text.encode(), **(
+            shared_closure if shared_closure is not None
+            else {leanmod.path_to_module(p): t.encode() for p, t in trusted_sources.items()})}
+        cache = self.build_cache(machine, toolchain, outputs, challenge_sources)
+        reuse = self.solution_store(machine, toolchain, outputs, sorted(
+            {SOLUTION, *map(leanmod.path_to_module, candidate_sources)} - set(challenge_sources)))
+        names = [p.get("name") for p in packages]
+        cancel = threading.Event()           # set when the check ends, or by a failed preflight: stops what still runs
+        with ThreadPoolExecutor(max_workers=2) as background:
+            try:
+                log_at = len(self.log)
+                preflight = None
+                if packages_dir is not None and dependencies:
+                    preflight = background.submit(self.preflight, box, scratch / "preflight", toolchain,
+                                                  render_lakefile(packages_dir, requires, {}, []), manifest,
+                                                  packages_dir, dependencies, cancel)
+                probe_dir = None
+                try:
+                    mark = time.monotonic()
+                    self.check_isolation(box, used_tools["landrun"])
+                    phases["isolation_probe"] = round(time.monotonic() - mark, 2)
+                    if self.on("probe_snapshot"):
+                        mark = time.monotonic()
+                        probe_dir = self.prebuild_challenge(box, project, tc_dir, used_tools["landrun"],
+                                                            scratch / "probe", cache, cancel)
+                        phases["prebuild_challenge"] = round(time.monotonic() - mark, 2)
+                finally:                         # the preflight's verdict comes first, as when it ran first
+                    if preflight is not None:
+                        entry, stop, phases["preflight"] = preflight.result()
+                        self.log.insert(log_at, entry)
+                        if stop is not None:
+                            raise stop
+                probe_box = replace(box, yields=True)
 
+                def probe(folder: Path, step: str = "probes") -> dict[str, Any]:
+                    return self.run_probes(probe_box, folder, spec.theorems, config, packages_dir, names, cancel, step)
+
+                probes = None if probe_dir is None else background.submit(probe, probe_dir)
+                result, axioms, kernels = self.compare(self.solution_overlay(box, project, scratch, reuse), project,
+                                                       scratch, spec, config, used_tools, use_nanoda, phases)
+                self.store_solution(project, reuse)
+                if result.verdict != "pass":
+                    raise _Stop(result.verdict, result.reason)
+                alone = None if probe_dir is None else (lambda: probe(probe_dir, "probes_alone"))
+                if not self.on("probe_snapshot"):     # test-only: probe the project as the candidate left it
+                    probe_dir = self.probe_workspace(project, scratch / "probe")
+                    probes = None if probe_dir is None else background.submit(probe, probe_dir)
+                    alone = None
+                self.record_probes(probes, alone)
+                return self.outcome("pass", [f"{result.reason}: {len(spec.theorems)} theorem(s), "
+                                             f"kernels {', '.join(kernels)}, axioms within {axioms}"])
+            finally:
+                cancel.set()
+                _owner_may_remove(scratch / OVERLAY_WORK)
+
+    def build_environment(self, toolchain: str, outputs: dict[str, bytes]) -> dict[str, Any]:
+        """What every product of the check project's build depends on besides its sources: a part of every key."""
+        return {"toolchain": toolchain, "lean": self.environment["lean_version"],
+                "compiler": self.environment.get("build_tools") or {
+                    name: self.environment["tools"][name]["sha256"] for name in ("lean", "lake")},
+                "lakefile": sha256_hex(outputs["lakefile.toml"]),
+                "manifest": sha256_hex(outputs["lake-manifest.json"]),
+                "packages": (self.environment["packages"] or {}).get("identity")}
+
+    def build_cache(self, machine: Machine, toolchain: str, outputs: dict[str, bytes],
+                    sources: dict[str, bytes]) -> tuple[Path, dict[str, str]] | None:
+        """(the trusted build store, the key of each module the challenge build compiles), or None when this check
+        neither reads nor writes the store: exploratory checks, a guard disabled, `[check] build_cache = false`."""
+        if not (self.protected and not self.req.guards and machine.build_cache):
+            return None
+        try:
+            return build_store_root(), lean_build_cache.module_keys(self.build_environment(toolchain, outputs), sources)
+        except ValueError as exc:                          # an import cycle: the build reports it
+            self.notes.append(f"trusted build store not used: {exc}")
+            return None
+
+    def solution_store(self, machine: Machine, toolchain: str, outputs: dict[str, bytes],
+                       modules: list[str]) -> tuple[Path, str, list[str]] | None:
+        """(the store of solution builds, the key of this check's solution side, the modules it compiles), or None
+        when this check neither reads nor writes it: only a protected check with every guard on uses it, and only
+        with `[check] reuse_solution_builds` on (ADR 0008). The key binds every candidate input, the
+        generated solution module, the build environment and the sha256 of the tools that take part in the build
+        (not nanoda, which only replays the export: turning it on reuses the build)."""
+        if not (self.protected and not self.req.guards and machine.reuse_solution_builds):
+            return None
+        environment = {**self.build_environment(toolchain, outputs), "tools": {
+            name: tool["sha256"] for name, tool in self.environment["tools"].items() if name != "nanoda"}}
+        inputs = {**self.files, f"{SOLUTION}.lean": sha256_hex(outputs[f"{SOLUTION}.lean"])}
+        store, key = solution_store_root(), lean_build_cache.tree_key(environment, inputs, modules)
+        self.environment["solution_build"] = {"store": str(store), "key": key, "modules": modules, "reused": False,
+                                              "stored": False}
+        return store, key, modules
+
+    def solution_overlay(self, box: jail.Jail, project: Path, scratch: Path,
+                         reuse: tuple[Path, str, list[str]] | None) -> jail.Jail:
+        """Comparator's jail, with the stored solution build of exactly this check's inputs, when there is an intact
+        one, mounted read-only under the project's .lake/build through an overlay: Lake replays it instead of
+        compiling, and every write lands in the project. Untrusted, like any solution build: Comparator exports it and
+        the kernels replay it against the challenge."""
+        if reuse is None:
+            return box
+        store, key, modules = reuse
+        try:
+            lower = lean_build_cache.tree(store, key, modules)
+        except OSError:
+            lower = None
+        if lower is None:
+            if (store / key).exists():
+                self.notes.append(f"solution build store {store}: damaged entry {key} not used; delete it")
+            return box
+        build = project / ".lake" / "build"
+        build.mkdir(parents=True, exist_ok=True)
+        (scratch / OVERLAY_WORK).mkdir()
+        self.environment["solution_build"]["reused"] = True
+        return replace(box, overlays=(*box.overlays, (lower, build, scratch / OVERLAY_WORK, build)))
+
+    def store_solution(self, project: Path, reuse: tuple[Path, str, list[str]] | None) -> None:
+        """After Comparator ran: keep what its build of the solution compiled under this check's key, unless it came
+        from the store. Only `vl` writes the store, from its own process, once the jail is gone."""
+        if reuse is None or self.environment["solution_build"]["reused"]:
+            return
+        store, key, modules = reuse
+        build = project / ".lake" / "build"
+        if build.resolve() != project.resolve() / ".lake" / "build":   # the candidate turned it into a link
+            self.notes.append(f"solution build store {store} not written: {build} is a link")
+            return
+        try:
+            self.environment["solution_build"]["stored"] = lean_build_cache.save_tree(store, build, key, modules)
+        except OSError as exc:
+            self.notes.append(f"solution build store {store} not written: {exc}")
+
+    def compare(self, box: jail.Jail, project: Path, scratch: Path, spec: LeanSpec, config: Config,
+                used_tools: dict[str, Path], use_nanoda: bool, phases: dict[str, float]
+                ) -> tuple[Classified, list[str], tuple[str, ...]]:
+        """Run Comparator on the check project and classify its output: (result, permitted axioms, kernels)."""
+        req = self.req
         axioms = list(config.lean.permitted_axioms)
         kernels = ("lean", *([NANODA_KERNEL] if use_nanoda else []))
         self.checked.update(theorems=list(spec.theorems), witnesses=list(spec.witnesses), kernels=list(kernels),
@@ -1149,56 +1364,94 @@ class _Check:
             for key, value in (("modules", modules), ("jobs", dict(sorted(jobs.items())))):
                 if value:
                     self.extra[key] = value
-            if run.memory_peak is not None:
-                self.extra["memory_peak_bytes"] = max(run.memory_peak, self.extra.get("memory_peak_bytes", 0))
+            self.note_run("comparator", run)
             if run.returncode is None:
                 last = list(measured["phases"])[-1] if measured["phases"] else "start"
                 raise _Stop("error", f"Comparator timed out after {req.timeout:.0f} s (in phase {last})")
-            result = classify(run.stdout, run.stderr, run.returncode, spec.theorems, kernels)
+            result = classify(run.stdout, run.stderr, run.returncode, spec.theorems, kernels, service=run.service)
             if (not self.on("permitted_axioms") and result.axiom and result.axiom not in axioms
                     and runs <= _MAX_AXIOM_RERUNS):
                 axioms.append(result.axiom)                 # test-only: permit what the solution uses
                 continue
             break
+        if result.kernel_results:
+            self.checked["kernel_results"] = dict(result.kernel_results)
         self.checked["permitted_axioms"] = axioms
         self.checked["comparator"] = {"result": {"pass": "accepted", "fail": "rejected"}.get(result.verdict, "failed"),
                                       "message": result.message, "phase": result.phase, "runs": runs}
         self.extra["comparator_seconds"] = round(time.monotonic() - self.started, 2)
-        if result.verdict == "pass":
-            mark = time.monotonic()
-            names = [p.get("name") for p in (manifest or {}).get("packages", []) or []]
+        return result, axioms, kernels
+
+    def record_probes(self, probes: Future | None, alone: Callable[[], dict[str, Any]] | None = None) -> None:
+        """After a pass: what the statement probes found, as the receipt records it. A probe problem is never a
+        verdict. When the run beside Comparator did not finish (a timeout, a crash, its unit ended by systemd: it
+        shared the check's CPUs and memory, and gives way), `alone` runs the probes again, now alone, and that run is
+        the one recorded, with why it was needed (`probe_run.rerun_alone`)."""
+        seconds = 0.0
+        if probes is not None:
             try:
-                if not self.on("probe_snapshot"):        # test-only: probe the project as the candidate left it
-                    probe_dir = self.probe_workspace(project, scratch / "probe")
-                self.run_probes(box, probe_dir, spec.theorems, config, packages_dir, names)
-            except Exception as exc:                       # a probe problem is never a verdict
+                ran = probes.result()
+            except Exception as exc:
                 self.checked.setdefault("probe_run", {}).setdefault("problems", []).append(
                     f"internal error in the probe runner: {type(exc).__name__}: {exc}")
-            self.extra["phases"]["probes"] = round(time.monotonic() - mark, 2)
-            return self.outcome("pass", [f"{result.reason}: {len(spec.theorems)} theorem(s), "
-                                         f"kernels {', '.join(kernels)}, axioms within {axioms}"])
-        raise _Stop(result.verdict, result.reason)
+            else:
+                if ran.get("log"):
+                    self.log.append(ran["log"])
+                seconds = ran["seconds"]
+                if ran.get("unfinished") and alone is not None:
+                    why = ran["probe_run"]["problems"][0]
+                    ran = alone()
+                    ran["probe_run"]["rerun_alone"] = f"the run beside Comparator did not finish: {why}"
+                    self.extra["phases"]["probes_alone"] = ran["seconds"]
+                    if ran.get("log"):
+                        self.log.append(ran["log"])
+                self.checked["probe_run"] = ran["probe_run"]
+                if "probes" in ran:
+                    self.checked["probes"] = ran["probes"]
+        self.extra["phases"]["probes"] = seconds
 
-    def prebuild_challenge(self, box: jail.Jail, project: Path, tc_dir: Path, landrun: Path, probe_dir: Path) -> Path | None:
+    def prebuild_challenge(self, box: jail.Jail, project: Path, tc_dir: Path, landrun: Path, probe_dir: Path,
+                           cache: tuple[Path, dict[str, str]] | None, cancel: threading.Event) -> Path | None:
         """Build the challenge exactly as Comparator does (`lake build VLChallenge` under landrun, only the
         project's `.lake` writable), before any candidate code is compiled, and copy its build products into
         `probe_dir`, a Lake workspace with the same lakefile and manifest and no sources. Returns None (probes
-        skipped, Comparator unaffected: it builds the challenge itself) when the build fails."""
+        skipped, Comparator unaffected: it builds the challenge itself) when the build fails. With `cache` (the
+        trusted build store and the key of each module this build compiles), the stored modules are copied in first
+        and, after a build that compiled trusted code only, the ones the store lacks are copied out."""
+        build = project / ".lake" / "build"
         (project / ".lake").mkdir(exist_ok=True)
+        if cache is not None:
+            store, keys = cache
+            try:
+                restored = lean_build_cache.restore(store, build, keys)
+            except OSError as exc:
+                shutil.rmtree(build, ignore_errors=True)
+                restored = {}
+                self.notes.append(f"trusted build store {store} not read: {exc}")
+            damaged = sorted(k for m, k in keys.items() if m not in restored and (store / k).exists())
+            if damaged:
+                self.notes.append(f"trusted build store {store}: damaged entries {damaged} not used; delete them")
+            self.environment["build_cache"] = {"store": str(store), "restored": restored, "stored": [],
+                                               "stored_keys": {}}
         git = jail.program("git")
         command = [jail.program("env") or "/usr/bin/env", "-C", str(project), "LEAN_ABORT_ON_PANIC=1", str(landrun),
                    "--best-effort", "--ro", "/", "--rw", "/dev", "-ldd", "-add-exec",
                    "--env", "PATH", "--env", "HOME", "--env", "LEAN_ABORT_ON_PANIC",
+                   *(["--env", "LEAN_NUM_THREADS"] if self.req.threads else []),
                    "--ro", str(project), "--rwx", str(project / ".lake"), "--rox", str(tc_dir),
                    *(["--rox", git] if git else []), "--", "lake", "build", CHALLENGE]
         remaining = self.remaining("building the challenge")
         try:
             proc = jail.run(box, command, timeout=remaining, memory_max=self.req.memory_max,
-                            memory_total=self.req.memory_total)
-        except subprocess.TimeoutExpired:
+                            memory_total=self.req.memory_total, cancel=cancel)
+        except subprocess.TimeoutExpired as exc:
+            self.note_run("prebuild_challenge", exc)
+            if cancel is not None and cancel.is_set():       # the preflight's own stop replaces this one
+                raise _Stop("error", "the challenge build was stopped: the dependency preflight failed")
             raise _Stop("error", f"timed out after {self.req.timeout:.0f} s building the challenge")
         except RuntimeError as exc:
             raise _Stop("error", f"building the challenge failed to run: {exc}")
+        self.note_run("prebuild_challenge", proc)
         out = (proc.stdout + proc.stderr).decode("utf-8", "replace")
         self.log.append(f"=== challenge build for the statement probes: lake build {CHALLENGE}\n"
                         f"--- exit {proc.returncode}\n{out}")
@@ -1208,6 +1461,13 @@ class _Check:
         # Lake's per-module times of this build, as if Comparator had printed them while building the challenge.
         self.prebuilt = timings([(0.0, "stdout", f"Building {CHALLENGE}"),
                                  *((0.0, "stdout", line) for line in out.splitlines())], 0.0)
+        if cache is not None:
+            try:
+                stored = lean_build_cache.save(store, build, keys)
+                self.environment["build_cache"]["stored"] = stored
+                self.environment["build_cache"]["stored_keys"] = {m: keys[m] for m in stored if m in keys}
+            except OSError as exc:
+                self.notes.append(f"trusted build store {store} not written: {exc}")
         return self.probe_workspace(project, probe_dir)
 
     def probe_workspace(self, project: Path, probe_dir: Path) -> Path | None:
@@ -1224,76 +1484,100 @@ class _Check:
             return None
         return probe_dir
 
-    def run_probes(self, box: jail.Jail, probe_dir: Path | None, theorems: tuple[str, ...], config: Config,
-                   packages_dir: Path | None, package_names: list[Any]) -> None:
-        """Triviality and vacuity of each target theorem, on the pre-built challenge copy. Never changes the
-        verdict: a crash, an unreadable output or a timeout is recorded under `probe_run.problems`."""
-        if probe_dir is None:
-            return
+    def run_probes(self, box: jail.Jail, probe_dir: Path, theorems: tuple[str, ...], config: Config,
+                   packages_dir: Path | None, package_names: list[Any], cancel: threading.Event,
+                   step: str = "probes") -> dict[str, Any]:
+        """Triviality and vacuity of each target theorem, and what a referee must weigh (its in-project definitions,
+        totalized operations and boundary values, ADR 0010), on the pre-built challenge copy; runs beside
+        Comparator, which `cancel` ends, as `step` ("probes"; "probes_alone" when it runs again after a pass). Returns
+        what the receipt records after a pass: `probe_run`, and `probes` and the `log` entry once the probe file ran;
+        its `seconds`; and `unfinished` when the run itself did not end normally (it failed to start, timed out
+        before every theorem had a result, crashed or was ended by systemd), so that another run could do better. A
+        crash, an unreadable output or a timeout is a problem under `probe_run`, never a verdict."""
+        start = time.monotonic()
         tactics, imports = lean_probes.battery(packages_dir, [n for n in package_names if isinstance(n, str)])
         nonce = secrets.token_hex(8)
         run_info: dict[str, Any] = {"battery": tactics, "imports": imports,
                                     "heartbeats_per_attempt": config.probe_heartbeats,
                                     "timeout_seconds": config.probe_timeout, "problems": []}
-        self.checked["probe_run"] = run_info
+        ran: dict[str, Any] = {"probe_run": run_info}
         remaining = self.req.timeout - (time.monotonic() - self.started)
         timeout = min(config.probe_timeout, remaining)
         if timeout < 1:
             run_info["problems"].append("no time left for the probes within the check's timeout")
-            return
+            return {**ran, "seconds": round(time.monotonic() - start, 2)}
         text = lean_probes.probe_file(CHALLENGE, theorems, tactics, imports, config.lean.permitted_axioms,
-                                      config.probe_heartbeats, nonce, trivial=self.on("probe_trivial"),
-                                      vacuity=self.on("probe_vacuous"))
+                                      config.probe_heartbeats, nonce, project=(*config.lean.roots, CHALLENGE,
+                                                                              TRUSTED_PREFIX),
+                                      trivial=self.on("probe_trivial"), vacuity=self.on("probe_vacuous"))
         (probe_dir / "VLProbe.lean").write_text(text, encoding="utf-8")
         stdbuf = jail.program("stdbuf")
         command = [jail.program("env") or "/usr/bin/env", "-C", str(probe_dir), "lake", "env",
                    *([stdbuf, "-oL"] if stdbuf else []), "lean", "VLProbe.lean"]
         try:
             run = jail.stream(box, command, timeout=timeout, memory_max=self.req.memory_max,
-                              memory_total=self.req.memory_total)
+                              memory_total=self.req.memory_total, cancel=cancel)
         except RuntimeError as exc:
             run_info["problems"].append(f"the probes failed to run: {exc}")
-            return
+            return {**ran, "seconds": round(time.monotonic() - start, 2), "unfinished": True}
+        self.note_run(step, run)
         stdout, stderr = run.stdout.decode("utf-8", "replace"), run.stderr.decode("utf-8", "replace")
-        self.log.append(f"=== statement probes (nonce {nonce})\n--- exit {run.returncode}\n{stdout}\n--- stderr\n{stderr}")
+        ran["log"] = f"=== statement probes (nonce {nonce})\n--- exit {run.returncode}\n{stdout}\n--- stderr\n{stderr}"
         results, problems = lean_probes.parse_output(stdout, nonce, theorems)
+        unfinished = [name for name, entry in results.items() if "boundary" not in entry]
+        if unfinished:
+            run_info["boundary_unfinished"] = unfinished
         if run.returncode is None:
-            problems.insert(0, f"the probes timed out after {timeout:.0f} s; unfinished theorems record null")
+            if problems:     # else every theorem was probed: the time ran out on the boundary values, information
+                problems.insert(0, f"the probes timed out after {timeout:.0f} s; unfinished theorems record null")
+        elif run.service:
+            problems.insert(0, f"the probe run did not end normally: {run.service}")
         elif run.returncode != 0:
             tail = " | ".join((stdout + stderr).strip().splitlines()[-3:])[:400]
             problems.insert(0, f"the probe run exited with {run.returncode}: {tail}")
         run_info["problems"] = problems
         run_info["seconds"] = round(run.seconds, 2)
-        self.checked["probes"] = results
+        return {**ran, "probes": results, "seconds": round(time.monotonic() - start, 2),
+                "unfinished": bool(problems) and run.returncode != 0}
 
     def preflight(self, box: jail.Jail, folder: Path, toolchain: str, lakefile: str, manifest: dict[str, Any],
-                  packages_dir: Path, modules: list[str]) -> None:
+                  packages_dir: Path, modules: list[str], cancel: threading.Event) -> tuple[str, _Stop | None, float]:
         """Lake's own up-to-date check of the dependency modules the trusted side imports, in a workspace that
         holds only the generated lakefile and manifest (no candidate file), inside the jail where the packages
-        are read-only: `lake build --no-build` exits 3 when anything would have to be rebuilt."""
+        are read-only: `lake build --no-build` exits 3 when anything would have to be rebuilt. Runs beside the
+        challenge build: returns its log entry, why it stops the check (then it also sets `cancel`, which ends the
+        challenge build) or None, and its seconds."""
+        start = time.monotonic()
         folder.mkdir(parents=True)
         (folder / "lean-toolchain").write_text(toolchain + "\n")
         (folder / "lakefile.toml").write_text(lakefile)
         (folder / "lake-manifest.json").write_text(json.dumps(manifest, indent=1) + "\n")
         command = [jail.program("env") or "/usr/bin/env", "-C", str(folder), "lake", "build", "--no-build",
                    *(f"+{m}" for m in modules)]
+        entry = f"=== dependency preflight: lake build --no-build {' '.join(modules)}\n"
+        stop = None
         try:
             proc = jail.run(box, command, timeout=self.remaining("the dependency preflight"),
                             memory_max=self.req.memory_max, memory_total=self.req.memory_total)
         except (subprocess.TimeoutExpired, RuntimeError) as exc:
-            raise _Stop("error", f"dependency preflight (lake build --no-build) failed to run: {exc}")
-        out = (proc.stdout + proc.stderr).decode("utf-8", "replace")
-        self.log.append(f"=== dependency preflight: lake build --no-build {' '.join(modules)}\n"
-                        f"--- exit {proc.returncode}\n{out}")
-        if proc.returncode == 3:
-            owner = (str(packages_dir.parent.parent) if (packages_dir.name, packages_dir.parent.name) == ("packages", ".lake")
-                     else f"the project whose packages directory is {packages_dir}")
-            stale = re.findall(r"^- (.+)$", out, re.M)
-            raise _Stop("error", f"shared build cache is incomplete: run `lake build` in {owner}"
-                                 + (f" (Lake would rebuild {', '.join(stale[:5])})" if stale else ""))
-        if proc.returncode != 0:
-            raise _Stop("error", f"dependency preflight `lake build --no-build` failed (exit {proc.returncode}): "
-                                 + " | ".join(out.strip().splitlines()[-3:]))
+            self.note_run("preflight", exc)
+            stop = _Stop("error", f"dependency preflight (lake build --no-build) failed to run: {exc}")
+        else:
+            self.note_run("preflight", proc)
+            out = (proc.stdout + proc.stderr).decode("utf-8", "replace")
+            entry += f"--- exit {proc.returncode}\n{out}"
+            if proc.returncode == 3:
+                owner = (str(packages_dir.parent.parent) if (packages_dir.name, packages_dir.parent.name) == ("packages", ".lake")
+                         else f"the project whose packages directory is {packages_dir}")
+                stale = re.findall(r"^- (.+)$", out, re.M)
+                stop = _Stop("error", f"shared build cache is incomplete: run `lake build` in {owner}"
+                                      + (f" (Lake would rebuild {', '.join(stale[:5])})" if stale else ""))
+            elif proc.returncode != 0:
+                stop = _Stop("error", f"dependency preflight `lake build --no-build` failed (exit {proc.returncode}): "
+                                      + " | ".join(out.strip().splitlines()[-3:]))
+        if stop is not None:
+            cancel.set()
+        return entry, stop, round(time.monotonic() - start, 2)
 
     def tools(self, machine: Machine, toolchain: str, config: Config) -> tuple[dict[str, Path | None], dict[str, dict]]:
         """The tool paths, and where each came from. Protected: `protected_tool` (no environment, no relative path,
@@ -1316,7 +1600,7 @@ class _Check:
         repositories = (self.root, gitref.main_worktree(self.root))
         for name in TOOLS:
             tool, problem = protected_tool(name, machine, toolchain, config.tools, repositories)
-            if problem and (name != "nanoda" or config.lean.external_kernels):
+            if problem and (name != "nanoda" or config.lean.external_kernels or self.protected):
                 raise _Stop("error", problem)
             tools[name] = tool.path if tool else None
             if tool is not None:
@@ -1345,6 +1629,7 @@ class _Check:
             "systemd_service": box.deny_unix,
             "restrict_address_families": "~AF_UNIX (socket probe enforced before each exec)" if box.deny_unix else None,
             "slice": jail.SLICE if capped or box.deny_unix else None,
+            "threads": self.req.threads,
         }
         if not enforced:
             raise _Stop("unsupported", "landrun did not enforce Landlock inside bwrap (probe write was not "
@@ -1356,12 +1641,34 @@ class _Check:
         elif self.notes:
             self.checked["notes"] = list(self.notes)
         self.extra.setdefault("seconds", round(time.monotonic() - self.started, 2))
+        if self.peaks:
+            self.extra["memory_peak_bytes"] = check_peak(self.peaks)
+        if self.cpu:
+            self.extra["cpu_seconds"] = round(sum(self.cpu.values()), 2)
         return CheckOutcome(
             verdict=verdict, reasons=reasons, files=dict(sorted(self.files.items())),
             trusted_files=dict(sorted(self.trusted_files.items())), target=self.target,
             environment=self.environment, checked=self.checked, command=self.command,
             log="\n".join(self.log), extra=self.extra,
         )
+
+
+OVERLAY_WORK = "solution-overlay"   # in the scratch folder: overlayfs's work folder for a reused solution build
+
+
+def _owner_may_remove(folder: Path) -> None:
+    """overlayfs leaves its work folder without permissions; give them back so that the scratch folder can go."""
+    for path in (folder, folder / "work"):
+        if path.is_dir() and not path.is_symlink():
+            os.chmod(path, 0o700)
+
+
+def check_peak(peaks: dict[str, int]) -> int:
+    """The most memory a check held: the steps that run at once count together (the dependency preflight with the
+    challenge build, then Comparator with the statement probes), and the largest of the two pairs and of the probes
+    run again alone is the check's. The isolation probe, a shell beside the preflight, is left out."""
+    return max(peaks.get("preflight", 0) + peaks.get("prebuild_challenge", 0),
+               peaks.get("comparator", 0) + peaks.get("probes", 0), peaks.get("probes_alone", 0))
 
 
 def _lean_version(tc_dir: Path) -> str:

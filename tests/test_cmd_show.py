@@ -177,7 +177,7 @@ def test_receipts_summary_shows_admission_and_staleness(research_repo, monkeypat
     assert "pending-admission" in out and "NOT admitted (not on the trusted ref)" in out
     commit_all(root)
     rc, out, _ = vl(capsys, "show", "add-zero")
-    assert "status: verified]" in out and "· admitted ·" in out and "inputs fresh" in out
+    assert "status: check passed;" in out and "· admitted ·" in out and "inputs fresh" in out
     assert ('checked: {"axioms": [], "declarations": ["add_zero\'"], "kernels": ["lean", "nanoda"], '
             '"permitted_axioms": [], "theorems": ["Fixture.receipt"]}') in out
     (root / "Fixture" / "Basic.lean").write_text("-- changed\n")
@@ -208,3 +208,116 @@ def test_show_prints_the_phase_timing_of_the_newest_lean_receipt(research_repo, 
     assert card["timing"]["phases"]["build_challenge"] == 0.8
     make_receipt(root, finished="2026-10-01T12:00:00+00:00")         # newest receipt measured nothing: no line
     assert "timing of the newest" not in vl(capsys, "show", "add-zero")[1]
+
+
+def test_ctrl_c_ends_a_command_with_one_line_and_no_traceback(research_repo, monkeypatch, capsys):
+    from verifylab.commands import show
+
+    def interrupted(args):
+        raise KeyboardInterrupt
+    monkeypatch.chdir(research_repo)
+    monkeypatch.setattr(show, "run", interrupted)
+    rc, out, err = vl(capsys, "show", "add-zero")
+    assert rc == 130 and err == "vl: interrupted\n" and out == ""
+
+
+def test_show_snapshot_gives_committed_source_without_item_narrative_or_reviews(research_repo, monkeypatch, capsys):
+    root = research_repo
+    monkeypatch.chdir(root)
+    (root / "Fixture" / "Deep.lean").write_text("namespace Fixture\ndef deepDef : Nat := 7\nend Fixture\n")
+    (root / "Fixture" / "Mid.lean").write_text("import Fixture.Deep\nnamespace Fixture\ndef midDef : Nat := deepDef\nend Fixture\n")
+    (root / "research" / "targets").mkdir(parents=True, exist_ok=True)
+    target = root / "research" / "targets" / "snap.lean"
+    target.write_text("import Fixture.Mid\nnamespace VL.Snap\ntheorem main : Fixture.midDef = 7 := rfl\nend VL.Snap\n")
+    make_item(
+        root,
+        "snap",
+        title="SENTINEL_TITLE",
+        statement="SENTINEL_STATEMENT",
+        limits=["SENTINEL_LIMIT"],
+        assumptions=["SENTINEL_ASSUMPTION"],
+        lean={"target": "research/targets/snap.lean", "theorems": ["VL.Snap.main"]},
+        body="SENTINEL_BODY narrative prose.\n",
+    )
+    commit_all(root, "admit snap target")
+
+    card = json.loads(vl(capsys, "show", "snap", "--json")[1])["items"][0]
+    assert vl(capsys, "review", "snap", "--kind", "fidelity", "--verdict", "faithful",
+              "--expected-meaning-digest", card["meaning_digest"],
+              "--text", "SENTINEL_FIDELITY_NOTE", "--author", "agent:prev")[0] == 0
+    assert vl(capsys, "review", "snap", "--kind", "correction",
+              "--text", "SENTINEL_CORRECTION", "--author", "agent:prev")[0] == 0
+    commit_all(root, "admit reviews")
+
+    # Uncommitted worktree edit must NOT leak into snapshot
+    target.write_text("import Fixture.Mid\n-- UNCOMMITTED_WORKTREE_EDIT\n")
+    (root / "research" / "items" / "snap.md").write_text(
+        (root / "research" / "items" / "snap.md").read_text().replace("SENTINEL_TITLE", "WORKTREE_TITLE")
+    )
+
+    rc, text_out, err = vl(capsys, "show", "snap", "--snapshot")
+    assert rc == 0 and err == ""
+    trusted_head = git(root, "rev-parse", "trusted").strip()
+    assert card["meaning_digest"] in text_out
+    assert trusted_head in text_out
+    assert "theorem main : Fixture.midDef = 7 := rfl" in text_out
+    assert "def midDef : Nat := deepDef" in text_out
+    assert "def deepDef : Nat := 7" in text_out
+    for sentinel in ("SENTINEL_TITLE", "SENTINEL_STATEMENT", "SENTINEL_LIMIT", "SENTINEL_ASSUMPTION",
+                     "SENTINEL_BODY", "SENTINEL_FIDELITY_NOTE", "SENTINEL_CORRECTION", "UNCOMMITTED_WORKTREE_EDIT",
+                     "WORKTREE_TITLE", "unverified", "faithful"):
+        assert sentinel not in text_out
+
+    rc, json_out, _ = vl(capsys, "show", "snap", "--snapshot", "--json")
+    assert rc == 0
+    pkt = json.loads(json_out)["items"][0]
+    assert pkt["meaning_digest"] == card["meaning_digest"]
+    assert pkt["trusted_commit"] == trusted_head
+    assert [d["module"] for d in pkt["definitions"]] == ["Fixture.Mid", "Fixture.Deep"]
+    assert pkt["representation"] == "committed source including comments; no elaboration"
+    assert set(pkt.keys()) == {"representation", "id", "revision", "trusted_ref", "trusted_commit", "meaning_digest", "target", "definitions"}
+
+    # Control: normal `vl show` DOES include the prose and reviews that --snapshot stripped
+    normal_out = vl(capsys, "show", "snap")[1]
+    assert "SENTINEL_STATEMENT" in normal_out and "SENTINEL_FIDELITY_NOTE" in normal_out
+
+    assert vl(capsys, "show", "snap@abcd1234", "--snapshot")[0] == 2
+    assert vl(capsys, "show", "snap", "--snapshot", "--brief")[0] == 2
+    assert vl(capsys, "show", "snap", "--snapshot", "--impact")[0] == 2
+
+
+def test_show_reports_trusted_reading_size_and_omissions_without_changing_verdict(research_repo, monkeypatch, capsys):
+    root = research_repo
+    monkeypatch.chdir(root)
+    item = root / "research" / "items" / "add-zero.md"
+    item.write_text(item.read_text().replace("+++\nBody", '[lean]\ntarget = "Fixture/Target.lean"\n'
+                                             'theorems = ["main"]\n+++\nBody'))
+    (root / "Fixture").mkdir(exist_ok=True)
+    defs = root / "Fixture" / "Defs.lean"
+    defs.write_text("def helper : Nat := 1\n")
+    target = root / "Fixture" / "Target.lean"
+    # Clean control: only in-project imports.
+    target.write_text("import Fixture.Defs\ntheorem main : True := trivial\n")
+    commit_all(root, "complete target")
+    rc, out, _ = vl(capsys, "show", "add-zero", "--json")
+    card = json.loads(out)["items"][0]
+    rs = card["reading_size"]
+    assert rc == 0 and rs["complete"] is True and rs["omissions"] == []
+    assert rs["files"] == 2 and rs["lines"] == 3 and card["status"]["label"] == "unverified"
+    _, brief, _ = vl(capsys, "show", "add-zero", "--brief")
+    assert "trusted reading: 2 file(s), 3 line(s)," in brief and "never a verdict" in brief
+
+    # External import omitted: reported clearly in omissions; status stays unverified.
+    target.write_text("import Mathlib.Init\nimport Fixture.Defs\ntheorem main : True := trivial\n")
+    commit_all(root, "external import")
+    card2 = json.loads(vl(capsys, "show", "add-zero", "--json")[1])["items"][0]
+    rs2 = card2["reading_size"]
+    assert rs2["complete"] is False and any("Mathlib.Init" in o for o in rs2["omissions"])
+    assert rs2["files"] == 2 and card2["status"]["label"] == "unverified"
+    assert "omissions: external imports omitted (Mathlib.Init)" in vl(capsys, "show", "add-zero")[1]
+
+    # Missing in-project import on trusted ref: reported as incomplete closure.
+    defs.unlink()
+    commit_all(root, "drop defs")
+    rs3 = json.loads(vl(capsys, "show", "add-zero", "--json")[1])["items"][0]["reading_size"]
+    assert rs3["complete"] is False and any("import closure incomplete" in o for o in rs3["omissions"])

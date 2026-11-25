@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""Trial runner for an owned, prebuilt TOML project on an isolated worker."""
+
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import tomllib
+
+from verifylab import leanmod
+from verifylab.adapters.lean_comparator import _flatten
+from verifylab.foreign import client_sources, library_sources
+from verifylab.graph_inputs import lean_identity, olean_identity
+from verifylab.records import RecordError
+
+
+def build(source, targets, built, lean, overlay):
+    config = source / "lakefile.toml"
+    for name in ("lakefile.toml", "lake-manifest.json", "lean-toolchain"):
+        if (source / name).read_bytes() != (built / name).read_bytes():
+            raise ValueError(f"{name} differs from the prepared build")
+    layout = leanmod.lean_libraries(config.read_bytes())
+    settings = tomllib.loads(config.read_text())
+    for scope, spec in [("package", settings), *((f"lean_lib {entry.get('name')}", entry)
+                                                  for entry in settings.get("lean_lib", []))]:
+        for key in ("moreLeanArgs", "weakLeanArgs"):
+            if spec.get(key):
+                raise ValueError(f"{scope} uses {key}; use the Lake runner (scripts/runners/lake-build)")
+    if settings.get("input_dir"):
+        raise ValueError("Lake input directories require the project's own runner")
+    for entry in settings.get("input_file", []):
+        path = Path(entry["path"])
+        if path.is_absolute() or ".." in path.parts:
+            raise ValueError(f"expected a local Lake input: {path}")
+        if (source / path).read_bytes() != (built / path).read_bytes():
+            raise ValueError(f"{path} differs from the prepared build")
+    source_paths = [path.relative_to(source).as_posix() for path in source.rglob("*.lean")]
+    modules = {}
+    options = {}
+    for library, spec in zip(layout, settings.get("lean_lib", [])):
+        flags = {".".join(name): value for layer in (settings, spec)
+                 for name, value in _flatten(layer.get("leanOptions", {}))}
+        for module, path in library_sources([library], source_paths):
+            if module in modules and (modules[module] != path or options[module] != flags):
+                raise ValueError(f"ambiguous source layout for {module}")
+            modules[module], options[module] = path, flags
+    explicit = set(targets)
+    for module, path in client_sources(settings.get("srcDir", "."), set(source_paths), sorted(explicit - modules.keys())):
+        modules[module] = path
+        options[module] = {".".join(name): value for name, value in _flatten(settings.get("leanOptions", {}))}
+    version, commit, reported = lean_identity(lean, overlay)
+    toolchain = (source / "lean-toolchain").read_text().strip().rpartition(":")[2]
+    if toolchain != f"v{version}":
+        raise ValueError(f"expected {toolchain}; {reported}")
+    print(reported, flush=True)
+    env = {**os.environ, "LEAN_PATH": os.pathsep.join(map(str, [
+        overlay, *sorted((built / ".lake/packages").glob("*/.lake/build/lib/lean")),
+    ]))}
+    rebuilt = {}
+    visiting = set()
+
+    def visit(module):
+        if module in rebuilt:
+            return rebuilt[module]
+        if module in visiting:
+            raise ValueError(f"cyclic imports at {module}")
+        visiting.add(module)
+        relative = modules[module]
+        body = (source / relative).read_bytes()
+        imports = leanmod.parse_header(body.decode(), check_body=False).modules
+        changes = [visit(dep) for dep in imports if dep in modules]
+        target = overlay / leanmod.module_to_path(module)
+        target = target.with_suffix(".olean")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        cached = built / ".lake/build/lib/lean" / target.relative_to(overlay)
+        old_source = built / relative
+        # Rebuild requested modules on both sides. A dependency is reusable only
+        # when its source and all local dependencies can come from the prepared tree.
+        reuse = (module not in explicit and not any(changes) and old_source.is_file()
+                 and body == old_source.read_bytes() and cached.is_file()
+                 and olean_identity(cached) == (version, commit))
+        if reuse:
+            for suffix in ("", ".private", ".server"):
+                artifact = cached.with_name(cached.name + suffix)
+                if artifact.is_file():
+                    target.with_name(target.name + suffix).symlink_to(artifact)
+            print(f"reuse {module}", flush=True)
+        else:
+            flags = [f"-D{name}={str(value).lower() if isinstance(value, bool) else value}"
+                     for name, value in options[module].items()]
+            root = (source / relative).parents[len(Path(leanmod.module_to_path(module)).parts) - 1]
+            print(f"build {module}", flush=True)
+            subprocess.run([lean, f"--root={root}", "-o", target, *flags, source / relative],
+                           cwd=source, env=env, check=True)
+        visiting.remove(module)
+        rebuilt[module] = not reuse
+        return not reuse
+
+    for target in targets:
+        visit(target)
+
+
+def main():
+    if len(sys.argv) < 3:
+        raise ValueError("supply DIR MODULE... to the trial runner")
+    path, *targets = sys.argv[1:]
+    source = Path(path).resolve()
+    built = Path(os.environ["VL_BUILT_TREE"]).resolve(strict=True)
+    lean = Path(os.environ["VL_LEAN"]).absolute()
+    with tempfile.TemporaryDirectory(prefix=".trial-lean-", dir=source) as scratch:
+        build(source, list(dict.fromkeys(targets)), built, lean, Path(scratch))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except subprocess.CalledProcessError as exc:
+        sys.exit(exc.returncode if exc.returncode > 0 else 125)
+    except (KeyError, OSError, RecordError, ValueError) as exc:
+        print(f"lean-overlay: {exc}", file=sys.stderr)
+        sys.exit(125)

@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import posixpath
+import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from typing import Iterable
 
-from . import leanmod
-from .records import Item, canonical_json, sha256_hex
-from .repo import Repo, StoredRecord
+from . import gitref, leanmod
+from .config import PROTECTED_EXTERNAL_KERNELS, ConfigError
+from .records import Item, canonical_json, historical_kernel_profile, sha256_hex, timestamp
+from .repo import REVIEWS, Repo, StoredRecord
 
 CHECKABLE_CLAIMS = ("formal", "computation")
 UNDETERMINED = "undetermined"
@@ -66,13 +69,8 @@ _ADVERSE = {"pass": 0, "unsupported": 1, "error": 2, "fail": 3}
 def _instant(raw) -> tuple[int, float, str]:
     """A recorded time, at full precision: (1, POSIX seconds) for ISO 8601 (without a zone, UTC), else (0, its text),
     which sorts before every real time."""
-    try:
-        moment = datetime.fromisoformat(raw)
-    except (TypeError, ValueError):
-        return (0, 0.0, str(raw))
-    if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=timezone.utc)
-    return (1, moment.timestamp(), "")
+    seconds = timestamp(raw)
+    return (0, 0.0, str(raw)) if seconds is None else (1, seconds, "")
 
 
 def _when(record: StoredRecord) -> tuple[int, float, str]:
@@ -85,11 +83,15 @@ def receipt_order(record: StoredRecord) -> tuple:
     return (_when(record), _ADVERSE.get(record.data.get("verdict"), 0), record.path)
 
 
+_FAVOURABLE = {"fidelity": "faithful", "correspondence": "same"}
+
+
 def review_order(record: StoredRecord) -> tuple:
     """Newest last: by `created` as a time at full precision; among reviews of the same instant, a fidelity verdict
-    other than `faithful` counts as the newer (an adverse judgement is never lost to a tie), then the path decides."""
+    other than `faithful`, or a correspondence outcome other than `same`, counts as the newer (an adverse judgement is
+    never lost to a tie), then the path decides."""
     data = record.data
-    adverse = data.get("kind") == "fidelity" and data.get("verdict") != "faithful"
+    adverse = data.get("kind") in _FAVOURABLE and data.get("verdict") != _FAVOURABLE[data["kind"]]
     return (_instant(data.get("created", "")), adverse, record.path)
 
 
@@ -105,6 +107,35 @@ def probe_hits(receipt: dict, key: str) -> list[tuple[str, str]]:
         return []
     return [(name, entry[key]) for name, entry in sorted(probes.items())
             if isinstance(entry, dict) and isinstance(entry.get(key), str)]
+
+
+def _probe_entries(receipt: dict, skip: Iterable[str] = ()) -> list[tuple[str, dict]]:
+    probes = (receipt.get("checked") or {}).get("probes")
+    if not isinstance(probes, dict):
+        return []
+    return [(name, entry) for name, entry in sorted(probes.items()) if isinstance(entry, dict) and name not in skip]
+
+
+def probe_definitions(receipt: dict) -> list[str]:
+    """The in-project definitions the statements of the target theorems depend on, by a receipt's statement probes:
+    what Comparator checks to be the trusted ones and no machine checks to mean what the question asks. In the order
+    the probes found them, theorem by theorem."""
+    return list(dict.fromkeys(d for _, entry in _probe_entries(receipt) if isinstance(entry.get("definitions"), list)
+                              for d in entry["definitions"] if isinstance(d, str)))
+
+
+def probe_findings(receipt: dict, key: str, skip: Iterable[str] = ()) -> list[tuple[str, dict]]:
+    """(theorem, finding) for each well-formed `totalized` or `boundary` finding of a receipt's statement probes."""
+    return [(name, f) for name, entry in _probe_entries(receipt, skip) if isinstance(entry.get(key), list)
+            for f in entry[key] if isinstance(f, dict)]
+
+
+def unnamed_definitions(definitions: Iterable[str], texts: Iterable[str]) -> list[str]:
+    """The definitions none of `texts` names, by its full name or its last component, as a word."""
+    text = "\n".join(texts)
+    def named(name: str) -> bool:
+        return any(re.search(rf"(?<![\w.']){re.escape(n)}(?![\w'])", text) for n in {name, name.rsplit(".", 1)[-1]})
+    return [d for d in definitions if not named(d)]
 
 
 def vacuity_notes(receipt: dict) -> list[str]:
@@ -142,12 +173,14 @@ SINGLE_KERNEL = ("a pass replayed by the Lean kernel only, while [lean] external
 
 
 def single_kernel(repo: Repo, receipt: dict) -> bool:
-    """A protected Lean pass that only Lean's own kernel replayed while the trusted rules ask for external kernels:
-    it does not count as a pass. (Protected checks refuse to run without nanoda then; older receipts may have one.)"""
+    """A protected Lean pass that only Lean's own kernel replayed without an external kernel (nanoda):
+    under T0, newly issued receipts always require an external kernel regardless of `[lean] external_kernels`, while
+    pre-minimum historical receipts keep their coverage label when the repo's policy allowed single-kernel passes."""
     kernels = (receipt.get("checked") or {}).get("kernels")
+    has_external = isinstance(kernels, list) and any(k in kernels for k in PROTECTED_EXTERNAL_KERNELS)
     return (receipt.get("adapter") == "lean-comparator" and receipt.get("assurance") == "protected"
-            and receipt.get("verdict") == "pass" and (not isinstance(kernels, list) or "nanoda" not in kernels)
-            and repo.config.lean.external_kernels)
+            and receipt.get("verdict") == "pass" and not has_external
+            and (repo.config.lean.external_kernels or not historical_kernel_profile(receipt)))
 
 
 def counted_verdict(repo: Repo, record: StoredRecord) -> str:
@@ -357,6 +390,9 @@ class Fidelity:
     acknowledges: tuple[str, ...] = ()   # probe findings a review of the current meaning accepts, e.g. "trivial"
     legacy: bool = False                 # the deciding review binds the target file only (it records no meaning)
     unbound: tuple[str, ...] = ()        # parts of the meaning the deciding review, recorded earlier, does not bind
+    environment_from: str | None = None  # the commit the deciding review's semantic environment was inferred from
+    judgments: tuple[tuple[str, str], ...] = ()
+    texts: tuple[str, ...] = ()          # the texts of the admitted fidelity reviews of the current meaning
 
 
 def question_file(item: Item) -> str | None:
@@ -374,20 +410,25 @@ def question_file(item: Item) -> str | None:
 BOUND_LISTS = ("limits", "assumptions")
 
 
-def semantic_environment(repo: Repo) -> tuple[dict[str, str], list[str]]:
-    """Stable Lean meaning inputs from the pinned trusted commit, excluding cache placement.
+def semantic_environment(repo: Repo, commit: str | None = None) -> tuple[dict[str, str], list[str]]:
+    """Stable Lean meaning inputs from the pinned trusted commit (or from `commit`, with its own [lean] project and
+    roots), excluding cache placement.
 
     Lake TOML contributes the options the protected check propagates; arbitrary lakefile.lean is bound
-    conservatively by bytes. Invalid structured inputs retain their raw hash and a diagnostic.
+    conservatively by bytes. Invalid structured inputs retain their raw hash and a diagnostic. A `commit` whose
+    research/vl.toml is missing or invalid raises ConfigError.
     """
-    project = posixpath.normpath(repo.config.lean.project.strip() or ".")
-    roots = repo.config.lean.roots
+    lean, read = repo.config.lean, repo.read_trusted
+    if commit is not None:
+        lean, read = repo.lean_config_at(commit), (lambda path: gitref.show(repo.root, commit, path))
+    project = posixpath.normpath(lean.project.strip() or ".")
+    roots = lean.roots
     environment = {"research/vl.toml#meaning-rules": sha256_hex(canonical_json(
         {"project": project, "roots": sorted(set(roots))}).encode())}
     problems = []
     for name in ("lean-toolchain", "lake-manifest.json", "lakefile.toml", "lakefile.lean"):
         path = name if project == "." else f"{project}/{name}"
-        raw = repo.read_trusted(path)
+        raw = read(path)
         if raw is None:
             environment[path] = "absent"
             continue
@@ -415,7 +456,32 @@ def meaning(repo: Repo, item: Item) -> dict | None:
     every in-project module of its import closure, by sha256; the selected `theorems` and `witnesses`;
     `statement_sha256`, the digest of the item's claim text; and `limits_sha256` and `assumptions_sha256`, those of
     its lists (canonical JSON). Lean also binds stable project semantic-environment inputs.
-    None when the target or evaluator is not there."""
+    None when the target or evaluator is not there. Computed once per item revision for one command: it reads only
+    the trusted commit, which a command never moves."""
+    key = (item.path, item.revision)
+    if key not in repo.meanings:
+        repo.meanings[key] = _meaning(repo, item)
+    return copy.deepcopy(repo.meanings[key])
+
+
+def _trusted_lean_closure(repo: Repo, content: bytes, path: str) -> tuple[dict[str, bytes], list[str], str | None]:
+    roots = repo.config.lean.roots
+    project = posixpath.normpath(repo.config.lean.project.strip() or ".")
+    prel = (lambda p: p) if project == "." else (lambda p: f"{project}/{p}")
+    files: dict[str, bytes] = {}
+    try:
+        header = leanmod.parse_header(leanmod.decode(content, path))
+        start = [m for m in header.modules if leanmod.in_roots(m, roots)]
+        direct_external = [m for m in header.modules if not leanmod.in_roots(m, roots)]
+        result = leanmod.closure(start, roots, lambda p: repo.read_trusted(prel(p)))
+        for module, data in result.modules.items():
+            files[prel(leanmod.module_to_path(module))] = data
+        return files, sorted({*direct_external, *result.external}), None
+    except leanmod.LeanModError as exc:
+        return files, [], str(exc)
+
+
+def _meaning(repo: Repo, item: Item) -> dict | None:
     path = question_file(item)
     content = repo.read_trusted(path) if path else None
     if content is None:
@@ -431,18 +497,40 @@ def meaning(repo: Repo, item: Item) -> dict | None:
         basis["semantic_environment"] = environment
         if problems:
             basis["semantic_environment_error"] = "; ".join(problems)
-        roots = repo.config.lean.roots
-        project = posixpath.normpath(repo.config.lean.project.strip() or ".")
-        prel = (lambda p: p) if project == "." else (lambda p: f"{project}/{p}")
-        try:
-            header = leanmod.parse_header(leanmod.decode(content, path))
-            start = [m for m in header.modules if leanmod.in_roots(m, roots)]
-            closure = leanmod.closure(start, roots, lambda p: repo.read_trusted(prel(p)))
-            for module, data in closure.modules.items():
-                basis["files"][prel(leanmod.module_to_path(module))] = sha256_hex(data)
-        except leanmod.LeanModError as exc:
-            basis["closure_error"] = str(exc)
+        imported, _, error = _trusted_lean_closure(repo, content, path)
+        for rel, data in imported.items():
+            basis["files"][rel] = sha256_hex(data)
+        if error is not None:
+            basis["closure_error"] = error
+    if item.imports:
+        basis["imports"] = [dict(entry) for entry in item.imports]
     return basis
+
+
+def reading_size(repo: Repo, item: Item) -> dict | None:
+    """Trusted-reading size (`files`, `lines`, `bytes`, `complete`, `omissions`) of an item's target or evaluator
+    and its readable in-project import closure on the trusted ref. Informative only; never a verdict."""
+    path = question_file(item)
+    if path is None:
+        return None
+    content = repo.read_trusted(path)
+    if content is None:
+        return {"files": 0, "lines": 0, "bytes": 0, "complete": False,
+                "omissions": [f"{path} is not on the trusted ref '{repo.config.trusted_ref}'"]}
+    files: dict[str, bytes] = {path: content}
+    omissions: list[str] = []
+    if item.lean and isinstance(item.lean.get("target"), str):
+        imported, external, error = _trusted_lean_closure(repo, content, path)
+        files.update(imported)
+        if external:
+            shown = ", ".join(external[:4]) + (f", +{len(external) - 4} more" if len(external) > 4 else "")
+            omissions.append(f"external imports omitted ({shown})")
+        if error:
+            omissions.append(f"import closure incomplete: {error}")
+    total_bytes = sum(len(data) for data in files.values())
+    total_lines = sum(len(data.splitlines()) for data in files.values())
+    return {"files": len(files), "lines": total_lines, "bytes": total_bytes,
+            "complete": not omissions, "omissions": omissions}
 
 
 def meaning_digest(basis: dict) -> str:
@@ -461,11 +549,54 @@ def _changed(old: dict, new: dict, target: str) -> str:
         parts.append("definitions")
     if (old.get("theorems"), old.get("witnesses")) != (new.get("theorems"), new.get("witnesses")):
         parts.append("theorems")
+    if old.get("imports") != new.get("imports"):
+        parts.append("imports")
     if old.get("statement_sha256") != new.get("statement_sha256"):
         parts.append("claim")
     parts += [name for name in BOUND_LISTS                # a review recorded before they were bound never names them
               if f"{name}_sha256" in old and old[f"{name}_sha256"] != new.get(f"{name}_sha256")]
     return ", ".join(parts) or "meaning"
+
+
+_ENVIRONMENTS: dict[tuple[str, str], tuple[dict[str, str], list[str]]] = {}
+
+
+def _environment_at(repo: Repo, commit: str) -> tuple[dict[str, str], list[str]]:
+    """`semantic_environment` of `commit`, read once per process: what a commit holds never changes, and every card,
+    validation and catalog row of an item with an older review asks it again."""
+    key = (str(repo.root), commit)
+    if key not in _ENVIRONMENTS:
+        _ENVIRONMENTS[key] = semantic_environment(repo, commit)
+    environment, problems = _ENVIRONMENTS[key]
+    return dict(environment), list(problems)
+
+
+def bound_meaning(repo: Repo, review: StoredRecord) -> tuple[dict | None, str | None]:
+    """The meaning an admitted fidelity review binds, and the commit its semantic environment was inferred from.
+
+    A Lean review recorded before the semantic environment was bound is completed with the environment of the commit,
+    in the trusted commit's history, that added the review file (docs/adr/0004-older-review-environment.md). Every
+    such commit, and the commit the record says it read when it names one, must agree; otherwise, or when none can
+    be read, the meaning stays incomplete."""
+    recorded = review.data.get("meaning")
+    if not isinstance(recorded, dict) or "theorems" not in recorded or "semantic_environment" in recorded:
+        return recorded, None
+    commits = gitref.added(str(repo.root), repo.trusted_commit, repo.rel(REVIEWS)).get(review.path, ())
+    read = review.data.get("trusted_commit")
+    if not commits or read is not None and not (isinstance(read, str) and gitref.is_full_sha(read)
+                                                and gitref.ref_exists(repo.root, read)):
+        return recorded, None
+    try:
+        environments = [_environment_at(repo, commit) for commit in {*commits, read} - {None}]
+    except ConfigError:
+        return recorded, None
+    if any(e != environments[0] for e in environments):
+        return recorded, None
+    environment, problems = environments[0]
+    completed = {**recorded, "semantic_environment": environment}
+    if problems:
+        completed["semantic_environment_error"] = "; ".join(problems)
+    return completed, commits[0]
 
 
 def _binds_lists(review: StoredRecord) -> bool:
@@ -474,10 +605,18 @@ def _binds_lists(review: StoredRecord) -> bool:
     return isinstance(recorded, dict) and all(f"{name}_sha256" in recorded for name in BOUND_LISTS)
 
 
+def valid_supersession(new: dict, old: dict) -> bool:
+    return (new.get("kind") == old.get("kind") == "fidelity"
+            and all(new.get(k) == old.get(k) for k in ("item", "author", "meaning_digest"))
+            and new.get("meaning_digest") is not None
+            and _instant(new["created"]) > _instant(old["created"]))
+
+
 def fidelity(repo: Repo, item: Item) -> Fidelity | None:
     """The fidelity of `item` (as committed on the trusted ref, when it is there). A review counts while the meaning it
-    recorded (meaning_digest) is the meaning now. Lean reviews without the semantic environment remain
-    readable but require renewal. Older Python reviews bind less and say what (`unbound`): one recorded
+    recorded (meaning_digest) is the meaning now. A Lean review recorded before the semantic environment was bound
+    binds the environment of the commit that added it (bound_meaning, `environment_from`); when that cannot be read
+    it requires renewal. Older Python reviews bind less and say what (`unbound`): one recorded
     before limits and assumptions were bound counts while the rest of the meaning is the meaning now, until a review
     that binds them is admitted (else it would come back whenever a newer review goes stale through an edited limit);
     one written before reviews recorded a meaning binds only the target file's sha256 (`legacy`), and counts only
@@ -492,11 +631,13 @@ def fidelity(repo: Repo, item: Item) -> Fidelity | None:
         return Fidelity("target not admitted")
     reviews = [r for r in repo.reviews(item.id)
                if not r.problems and r.admitted and r.data["kind"] == "fidelity"]
+    bound = {r.path: bound_meaning(repo, r) for r in reviews}
+    digests = {path: meaning_digest(basis) if isinstance(basis, dict) else None for path, (basis, _) in bound.items()}
     without_lists = {k: v for k, v in now.items() if k not in {f"{name}_sha256" for name in BOUND_LISTS}}
     unbound: tuple[str, ...] = ()
-    matching = [r for r in reviews if r.data.get("meaning_digest") == meaning_digest(now)]
+    matching = [r for r in reviews if digests[r.path] == meaning_digest(now)]
     if not matching and not any(_binds_lists(r) for r in reviews):
-        matching = [r for r in reviews if r.data.get("meaning_digest") == meaning_digest(without_lists)]
+        matching = [r for r in reviews if digests[r.path] == meaning_digest(without_lists)]
         unbound = BOUND_LISTS
     legacy = not matching
     if legacy and "semantic_environment" not in now:
@@ -509,14 +650,19 @@ def fidelity(repo: Repo, item: Item) -> Fidelity | None:
         if not reviews:
             return Fidelity("not reviewed")
         newest = max(reviews, key=review_order)
-        recorded = newest.data.get("meaning")
+        recorded = bound[newest.path][0]
         if "semantic_environment" in now and (not isinstance(recorded, dict)
                                                 or "semantic_environment" not in recorded):
             return Fidelity("review stale: semantic environment not bound; review again",
                             unbound=("semantic environment",))
         what = _changed(recorded, now, path) if isinstance(recorded, dict) else "target"
         return Fidelity(f"review stale: {what} changed since review")
-    latest = max(matching, key=review_order)
+    records = {r.data["review_id"]: r for r in matching}
+    superseded = {key for r in matching if isinstance(key := r.data.get("supersedes_review"), str)
+                  and key in records and valid_supersession(r.data, records[key].data)}
+    matching = [r for r in matching if r.data["review_id"] not in superseded]
+    dissent = [r for r in matching if r.data.get("verdict") != "faithful"]
+    latest = max(dissent or matching, key=review_order)
     verdict = latest.data.get("verdict", "")
     label = "faithful" if verdict == "faithful" else f"disputed: {verdict}"
     by = latest.data["author"]
@@ -524,4 +670,42 @@ def fidelity(repo: Repo, item: Item) -> Fidelity | None:
     acknowledges = sorted({a for r in matching if isinstance(r.data.get("acknowledges"), list)
                            for a in r.data["acknowledges"]})
     return Fidelity(label, latest.path, by, self_review=(by == basis_item.author), created=latest.data.get("created"),
-                    acknowledges=tuple(acknowledges), legacy=legacy, unbound=tuple(unbound))
+                    acknowledges=tuple(acknowledges), legacy=legacy, unbound=tuple(unbound),
+                    environment_from=bound[latest.path][1],
+                    judgments=tuple((r.data["author"], r.data["verdict"]) for r in sorted(matching, key=review_order)),
+                    texts=tuple(str(r.data.get("text", "")) for r in matching))
+
+
+def correspondence(repo: Repo, item: Item) -> dict:
+    """How the item's formal statement relates to the paper's, from the admitted `correspondence` reviews (ADR 0013).
+    A review counts while the meaning it recorded (meaning_digest) is the meaning now. Per paper statement (the
+    review's `statement`, none when it names none) the newest review of the current meaning gives the outcome:
+    `same`, `stronger`, `weaker` or `different`; `state` is that outcome when every statement has the same one,
+    else `mixed`. A statement judged only before the meaning changed is listed as `stale` (so `mixed` with the rest);
+    reviews of another meaning only: `stale`. None at all: `not assessed`. No status is derived from
+    it and nothing assesses it by default."""
+    basis_item = repo.trusted_items()[0].get(item.id) or item
+    path = question_file(basis_item)
+    now = meaning(repo, basis_item) if path else None
+    reviews = [r for r in repo.reviews(item.id) if not r.problems and r.admitted and r.data["kind"] == "correspondence"]
+    if now is None or not reviews:
+        return {"state": "not assessed", "statements": [], "note": None if not reviews else "target not admitted"}
+    current = [r for r in reviews if r.data.get("meaning_digest") == meaning_digest(now)]
+    if not current:
+        recorded = max(reviews, key=review_order).data.get("meaning")
+        what = _changed(recorded, now, path) if isinstance(recorded, dict) else "meaning"
+        return {"state": "stale", "statements": [], "note": f"{what} changed since review"}
+    per_statement: dict[str | None, StoredRecord] = {}
+    for record in sorted(current, key=review_order):
+        per_statement[record.data.get("statement")] = record
+    def row(key, r, outcome):
+        return {"statement": key, "outcome": outcome, "review": r.path, "by": r.data["author"],
+                "created": r.data.get("created"), "self_review": r.data["author"] == basis_item.author}
+    rows = [row(key, r, r.data["verdict"]) for key, r in sorted(per_statement.items(), key=lambda kv: kv[0] or "")]
+    # A statement judged only before the meaning changed is not dropped: it stays as a `stale` row, so a fresh review
+    # of another statement cannot hide an older, possibly adverse, judgement (the state is then `mixed`).
+    judged = {r.data.get("statement"): r for r in sorted(reviews, key=review_order)}
+    rows += [row(key, r, "stale") for key, r in sorted(judged.items(), key=lambda kv: kv[0] or "")
+             if key not in per_statement]
+    outcomes = {row["outcome"] for row in rows}
+    return {"state": outcomes.pop() if len(outcomes) == 1 else "mixed", "statements": rows, "note": None}

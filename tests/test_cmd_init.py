@@ -56,9 +56,7 @@ def test_init_creates_the_layout_and_leaves_agents_alone(fresh_repo, monkeypatch
     assert ".vl-cache/" in (root / ".gitignore").read_text().splitlines()
     assert (root / "AGENTS.md").read_text() == AGENTS
     assert "AGENTS.md: not modified" in out and "WARNING" not in out
-    assert "<!-- vl:begin -->" in out and "vl validate" in out and "<!-- vl:end -->" in out
-    rules = [line for line in out.splitlines() if line[:2] in {f"{n}." for n in range(1, 10)}]
-    assert len(rules) == 7
+    assert "<!-- vl:begin -->" in out and "load the `verifylab` skill" in out and "<!-- vl:end -->" in out
 
 
 def test_init_refuses_twice(fresh_repo, monkeypatch, capsys):
@@ -119,3 +117,154 @@ def test_init_outside_git_is_a_tool_failure(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
     assert vl(capsys, "init")[0] == 2
     assert not (tmp_path / "research").exists()
+
+
+def test_optional_context_keeps_existing_problem_and_links_agents(fresh_repo, monkeypatch, capsys):
+    root = fresh_repo
+    (root / "research").mkdir()
+    (root / "research" / "problem.md").write_text("Owner's existing problem.\n")
+    monkeypatch.chdir(root)
+    rc, out, _ = vl(capsys, "init", "--context", "--write-agents", "--json")
+    data = json.loads(out)
+    assert rc == 0
+    assert (root / "research" / "problem.md").read_text() == "Owner's existing problem.\n"
+    assert data["context_kept"] == ["research/problem.md"]
+    for role in ("problem", "map", "ideas"):
+        assert (root / "research" / f"{role}.md").is_file()
+        assert f"{role}: `research/{role}.md`" in (root / "AGENTS.md").read_text()
+
+
+def test_context_refuses_escape_before_initializing(fresh_repo, tmp_path, monkeypatch, capsys):
+    root = fresh_repo
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (root / "research").symlink_to(outside, target_is_directory=True)
+    monkeypatch.chdir(root)
+    rc, _, err = vl(capsys, "init", "--context")
+    assert rc == 2 and "escapes the repository" in err
+    assert list(outside.iterdir()) == []
+
+
+def test_init_skills_symlinks_and_copies_idempotently(research_repo, tmp_path, monkeypatch, capsys):
+    home = tmp_path / "fake-home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(research_repo)
+
+    # Installs into ~/.claude/skills when research/ already exists
+    rc, out, err = vl(capsys, "init", "--skills", "claude")
+    assert rc == 0 and err == ""
+    assert "1 installed" in out
+    claude_dir = home / ".claude" / "skills"
+    installed = sorted(p.name for p in claude_dir.iterdir())
+    assert installed == ["verifylab"]                               # one skill, its references inside it
+    assert all((claude_dir / name).is_symlink() and (claude_dir / name / "SKILL.md").is_file() for name in installed)
+    assert (claude_dir / "verifylab/references/study.md").is_file()
+
+    # Idempotent rerun
+    rc, out, _ = vl(capsys, "init", "--skills", "claude", "--json")
+    assert rc == 0
+    data = json.loads(out)
+    assert data["installed"] == [] and data["kept"] == ["verifylab"] and data["skills"] == ["verifylab"]
+
+    # Copy mode to explicit path + idempotent rerun
+    custom = tmp_path / "copied-skills"
+    rc, out, _ = vl(capsys, "init", "--skills", str(custom), "--copy")
+    assert rc == 0 and "1 installed" in out
+    assert all((custom / name).is_dir() and not (custom / name).is_symlink() for name in installed)
+    assert (custom / "verifylab" / "references" / "referee.md").is_file()
+    rc, out, _ = vl(capsys, "init", "--skills", str(custom), "--copy", "--json")
+    assert rc == 0 and json.loads(out)["kept"] == ["verifylab"]
+    (custom / "verifylab" / "references" / "referee.md").write_text("edited")           # a stale copy is replaced whole
+    rc, out, _ = vl(capsys, "init", "--skills", str(custom), "--copy", "--json")
+    assert rc == 0 and json.loads(out)["updated"] == ["verifylab"]
+    assert (custom / "verifylab" / "references" / "referee.md").read_text().startswith("# Find traps")
+
+    assert vl(capsys, "init", "--copy")[0] == 2
+
+
+def test_init_skills_refuses_conflict_before_partial_install(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    dest = tmp_path / "dest-skills"
+    dest.mkdir()
+    (dest / "verifylab").mkdir()    # non-symlink conflict
+
+    rc, _, err = vl(capsys, "init", "--skills", str(dest))
+    assert rc == 2 and "not a symlink" in err
+    assert [p.name for p in dest.iterdir()] == ["verifylab"]
+
+    # Control: removing the blocking folder allows clean install
+    (dest / "verifylab").rmdir()
+    rc, _, _ = vl(capsys, "init", "--skills", str(dest))
+    assert rc == 0 and [p.name for p in dest.iterdir()] == ["verifylab"]
+
+
+def test_existing_project_can_emit_current_instructions_without_writes(fresh_repo, monkeypatch, capsys):
+    monkeypatch.chdir(fresh_repo)
+    rc, _, _ = vl(capsys, "init", "--context", "--json")
+    assert rc == 0
+    before = git(fresh_repo, "status", "--porcelain")
+    rc, out, err = vl(capsys, "init", "--print-agents", "--json")
+    assert rc == 0, err
+    snippet = json.loads(out)["snippet"]
+    assert "research/problem.md" in snippet and "<!-- vl:context -->" not in snippet
+    assert "load the `verifylab` skill" in snippet
+    assert "`--status`" not in snippet and "MemoryMax" not in snippet
+    assert git(fresh_repo, "status", "--porcelain") == before
+    assert (fresh_repo / "AGENTS.md").read_text() == AGENTS
+
+
+def test_codex_and_pi_install_the_same_version(tmp_path, monkeypatch, capsys):
+    from verifylab import __version__
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    pi = tmp_path / "pi" / "agent" / "skills"
+    contents = []
+    for target, path in (("codex", tmp_path / ".codex" / "skills"), (str(pi), pi)):
+        rc, out, err = vl(capsys, "init", "--skills", target, "--copy", "--json")
+        assert rc == 0 and not err
+        assert json.loads(out)["version"] == __version__
+        contents.append((path / "verifylab/SKILL.md").read_text())
+    assert contents[0] == contents[1]
+    assert f'version: "{__version__}"' in contents[0]
+
+
+@pytest.mark.parametrize("phase", ["first-copy", "upgrade-copy", "upgrade-rename"])
+def test_failed_skill_install_preserves_the_previous_copy(tmp_path, monkeypatch, capsys, phase):
+    import shutil
+
+    dest = tmp_path / "skills"
+    args = "init", "--skills", str(dest), "--copy"
+    live = dest / "verifylab"
+    note = live / "references/study.md"
+    if phase.startswith("upgrade"):
+        assert vl(capsys, *args)[0] == 0
+        note.write_text("previous version")
+
+    copy = shutil.copytree
+    rename = Path.rename
+
+    def truncated(src, path, **kwargs):
+        if Path(src).name == "verifylab":
+            Path(path).mkdir()
+            (Path(path) / "SKILL.md").touch()
+            raise OSError("no space during copy")
+        return copy(src, path, **kwargs)
+
+    def failed_rename(path, target):
+        if path.name == "incoming":
+            raise OSError("cannot publish")
+        return rename(path, target)
+
+    with monkeypatch.context() as patch:
+        if phase == "upgrade-rename":
+            patch.setattr(Path, "rename", failed_rename)
+        else:
+            patch.setattr(shutil, "copytree", truncated)
+        assert vl(capsys, *args)[0] == 2
+    if phase.startswith("upgrade"):
+        assert note.read_text() == "previous version"
+    else:
+        assert not live.exists()
+    assert vl(capsys, *args)[0] == 0 and note.read_text() != "previous version"

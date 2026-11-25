@@ -55,13 +55,13 @@ editing them does not stale receipts. `lean-toolchain` and `lake-manifest.json` 
 inputs of their own. Receipts that recorded `#verdict` (the same plus the `packages` and `cache` paths) or `#check`
 (also without roots; their roots are compared through the commit they checked) keep their basis.
 
-## 6. Statement probes after every pass
+## 6. Statement probes recorded after every pass
 Comparator proves that a proof matches the trusted target; it cannot tell whether the target says anything. After a
 pass, a fixed tactic battery tries to close each target theorem alone (triviality) and to derive `False` from its
-hypotheses (vacuity), on a copy of the challenge build taken before any candidate code was compiled. A vacuity hit
-makes the status `vacuous`, never `verified`, and a later run of the same inputs whose probes did not finish never
-erases it; a triviality hit is a `vl validate` warning until a fidelity review of
-the current target acknowledges it (`--acknowledge trivial`); probes that crash, time out or are skipped are named
+hypotheses (vacuity), on a copy of the challenge build taken before any candidate code was compiled. The probes
+run beside Comparator and are recorded only after a pass (ADR 0005 §4). A vacuity hit makes the status
+`vacuous`, never `verified`, and a later run of the same inputs whose probes did not finish never erases it; a
+triviality hit is a `vl validate` warning until a fidelity review of the current target acknowledges it (`--acknowledge trivial`); probes that crash, time out or are skipped are named
 on the card and in `vl validate`, never a verdict. A target theorem with Prop hypotheses needs a witness theorem in
 the same target, listed in `[lean] witnesses`. Why: weak, trivial and vacuous targets pass Comparator, also when
 the trusted side wrote them.
@@ -91,7 +91,6 @@ adding `refutes` to a worktree item refuted a verified result; and a read that f
 retraction.
 
 ## 10. A fidelity review binds the meaning it read
-
 An explicit historical item revision cannot authorize a review of current meaning. New fidelity reviews require
 the current trusted item revision and record it, including when worktree prose differs. Existing records whose
 resolvable item revision contradicts their saved meaning are rejected without rewriting them. The self-review
@@ -103,10 +102,11 @@ A fidelity review records, from the trusted ref, the digest of what decides the 
 evaluator) and, for Lean, every in-project module of its import closure; the selected theorems and witnesses; the
 item's claim text, its `limits` and its `assumptions`, plus the stable Lean semantic environment. It counts only while that digest is the one now, and the card
 says which part changed when it is not. The title and the body explain and are not bound. A review written before
-this records only `target_sha256`, and one written before limits and assumptions were bound lacks their digests;
-Older Lean bindings require renewal once semantic-environment binding is supported; they are not rewritten.
-Older Python bindings keep their basis, marked on the card with what they do not bind, and `vl validate` asks for a new one. The
-second counts only until a review that binds limits and assumptions is admitted: otherwise, when that newer review
+this records only `target_sha256`, and one written before limits and assumptions were bound lacks their digests.
+An older Lean binding without that environment takes the one of the commit that added it (ADR 0004); one that
+binds the target only requires renewal. Neither is rewritten. Older Python bindings keep their basis, marked on the
+card with what they do not bind, and `vl validate` asks for a new one. A review that lacks the limits and assumptions
+digests counts only until a review that binds them is admitted: otherwise, when that newer review
 went stale through an edited limit, the older one would count again. Two
 reviews with the same words of different meanings are different reviews. Why: a `faithful` review of one file
 survived a change of the definitions the statement uses, of the theorem list, and of the claim it was judged
