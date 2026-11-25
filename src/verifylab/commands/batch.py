@@ -106,7 +106,7 @@ def command(item_id: str, args) -> list[str]:
         argv += ["--max-wait", str(args.max_wait)]
     if anchor := getattr(args, "_batch_anchor", None):
         argv[2:4] = ["-c", "from verifylab.cli import main; raise SystemExit(main(_batch_worker=True))"]
-        argv += ["--_batch-anchor", *anchor]
+        argv += [f"--_batch-anchor={json.dumps(list(anchor))}"]      # one value, which may start with "-"
     elif args.trusted_ref:
         argv += ["--trusted-ref", args.trusted_ref]
     return argv

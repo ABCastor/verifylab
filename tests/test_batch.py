@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import sys
 import textwrap
+import argparse
 from argparse import Namespace
 from pathlib import Path
 
@@ -512,6 +513,17 @@ def test_batch_sigkill_stops_worker_and_cleans_owned_service_only(lean_repo, tmp
         other.wait(timeout=5)
         other.stdout.close()
         other.stderr.close()
+
+
+def test_the_batch_anchor_reaches_the_worker_whole_when_a_value_starts_with_a_dash():
+    """`--trusted-ref`, the source of a ref given on the command line, would be read as an option if passed apart."""
+    from verifylab import cli
+    args = Namespace(timeout=1.0, max_wait=None, trusted_ref=None, _batch_anchor=("c0ffee", "trusted", "--trusted-ref"))
+    anchor = [a for a in batch.command("t1", args) if a.startswith("--_batch-anchor")]
+    assert len(anchor) == 1 and "=" in anchor[0]
+    assert cli._batch_anchor(anchor[0].split("=", 1)[1]) == ("c0ffee", "trusted", "--trusted-ref")
+    with pytest.raises(argparse.ArgumentTypeError):
+        cli._batch_anchor('["c0ffee", "trusted"]')
 
 
 @pytest.mark.parametrize("move", [False, True])

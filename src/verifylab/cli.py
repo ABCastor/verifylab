@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import json
 import sys
 
 from . import __version__
@@ -36,6 +37,18 @@ class CommandParser(argparse.ArgumentParser):
         super().error(f"{message}. Next, run {self.prog} --help.")
 
 
+
+def _batch_anchor(text: str) -> tuple[str, str, str]:
+    """The batch's trusted commit, ref and ref source, as one JSON list: a value such as `--trusted-ref` would
+    otherwise be read as an option."""
+    try:
+        value = json.loads(text)
+    except ValueError:
+        value = None
+    if not (isinstance(value, list) and len(value) == 3 and all(isinstance(v, str) for v in value)):
+        raise argparse.ArgumentTypeError("expected a JSON list of three strings")
+    return (value[0], value[1], value[2])
+
 def build_parser(*, _batch_worker: bool = False) -> argparse.ArgumentParser:
     parser = CommandParser(
         prog="vl",
@@ -49,7 +62,7 @@ def build_parser(*, _batch_worker: bool = False) -> argparse.ArgumentParser:
         module = importlib.import_module(f"verifylab.commands.{name}")
         cmd = module.register(sub)
         if _batch_worker and name == "check":
-            cmd.add_argument("--_batch-anchor", nargs=3, help=argparse.SUPPRESS)
+            cmd.add_argument("--_batch-anchor", type=_batch_anchor, help=argparse.SUPPRESS)
         cmd.add_argument("--json", action="store_true", help="print versioned JSON instead of text")
         if name not in ("init", "lane", "queue", "export", "receipts", "jobs", "inspect"):  # init writes the trusted ref
             cmd.add_argument("--trusted-ref", metavar="REF", help=TRUSTED_REF_HELP)
