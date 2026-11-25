@@ -1,0 +1,25 @@
+{
+  "adapter": "lean-comparator",
+  "checked": {
+    "kernels": [
+      "lean",
+      "nanoda"
+    ],
+    "trusted_modules": [
+      "VLTrusted/ReplayFixture/Support.lean"
+    ]
+  },
+  "environment": {
+    "packages": {
+      "dir": "/fixture/packages"
+    }
+  },
+  "finished_at": "2026-10-01T00:00:00Z",
+  "inputs": {
+    "trusted_files": {
+      "research/vl.toml": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  },
+  "item_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "started_at": "2026-10-01T00:00:00Z"
+}

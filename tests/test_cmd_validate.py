@@ -124,7 +124,7 @@ def test_explanations_must_not_cite_retracted_items(research_repo, monkeypatch, 
     make_item(root, "why", kind="explanation", body="Because.\n", cites=["add-zero"])
     rc, out, _ = vl(capsys, "validate")
     assert rc == 0
-    assert any("cites 'add-zero', which is not verified (status: unverified)" in w for w in messages(out, "WARNING"))
+    assert any("cites 'add-zero', whose check has not passed (status: unverified)" in w for w in messages(out, "WARNING"))
     make_review(root, kind="retraction", text="wrong target")
     commit_all(root)
     rc, out, _ = vl(capsys, "validate")
@@ -194,7 +194,8 @@ def test_incoming_branch_cannot_bring_receipts_or_edit_records(research_repo, mo
     data = json.loads(out)
     assert data["ok"] is False and data["incoming"]
     assert data["trusted_changes"] == [] and data["stale_after_merge"] == []
-    assert vl(capsys, "validate", "--incoming", "no-such-branch")[0] == 2
+    rc, _, err = vl(capsys, "validate", "--incoming", "no-such-branch")
+    assert rc == 2 and "--incoming no-such-branch: no such branch or commit" in err and "fatal" not in err
 
 
 def _forge_explore_receipt(root: Path) -> Path:
@@ -263,14 +264,14 @@ def test_verified_without_fidelity_review_warns_and_review_clears_it(research_re
     write_new_json(root / "research" / "evidence" / "add-zero" / f"{receipt['receipt_id'][:16]}.json", receipt)
     commit_all(root, "admit")
     rc, out, _ = vl(capsys, "validate")
-    assert "fidelity is 'not reviewed'" in out
+    assert "check passed against a target whose fidelity is 'not reviewed'" in out
     vl(capsys, "review", "add-zero", "--kind", "fidelity", *meaning_args(), "--verdict", "faithful", "--author", "agent:test",
        "--text", "states n + 0 = n over Nat")
     commit_all(root, "review")
     rc, out, _ = vl(capsys, "validate")
     assert "not reviewed" not in out and "is by the item's author" in out
     rc, out, _ = vl(capsys, "show", "add-zero")
-    assert "fidelity: faithful (self-review)" in out.splitlines()[0]
+    assert "fidelity review is a self-review" in out.splitlines()[0]
     target.write_text("theorem main (n : Nat) : n + 0 = n ∨ True := sorry\n")
     commit_all(root, "change target")
     rc, out, _ = vl(capsys, "validate")
@@ -568,3 +569,107 @@ def test_prose_without_process_state_and_quotes_in_fenced_code_are_clean(researc
     from verifylab.commands.validate import outside_fences
     assert outside_fences("a\n````\nb\n```\nc\n`````\nd") == "a\nd"         # a shorter fence does not close; a longer does
     assert outside_fences("a\n  ~~~ x\nb\n") == "a"                           # an unclosed fence runs to the end
+
+
+def _library(root: Path, lakefile: str) -> None:
+    """A Lake library `Fixture` whose root module imports Fixture.Basic, which imports Fixture.Deep; Fixture.Orphan is
+    imported by nothing."""
+    (root / "lakefile.toml").write_text('name = "fixture"\n\n[[lean_lib]]\nname = "Fixture"\n' + lakefile)
+    (root / "Fixture.lean").write_text("import Fixture.Basic\n")
+    (root / "Fixture" / "Basic.lean").write_text("import Fixture.Deep\ntheorem add_zero' (n : Nat) : n + 0 = n := rfl\n")
+    (root / "Fixture" / "Deep.lean").write_text("/-! A module docstring ends the header. -/\ndef deep := 1\n")
+    (root / "Fixture" / "Orphan.lean").write_text("import Mathlib\ndef orphan := 2\n")
+    commit_all(root, "a Lake library")
+
+
+def unbuilt(out: str) -> list[str]:
+    return [w for w in messages(out, "WARNING") if "lake build" in w]
+
+
+def test_a_module_the_library_build_leaves_out_warns(research_repo, monkeypatch, capsys):
+    root = research_repo
+    monkeypatch.chdir(root)
+    _library(root, "")
+    rc, out, _ = vl(capsys, "validate")
+    # Planted: Fixture.Orphan; control: the root module, an import and a transitive import.
+    assert rc == 0 and unbuilt(out) == [
+        "WARNING Fixture/Orphan.lean: `lake build Fixture` leaves Fixture.Orphan out: no module its globs (Fixture) "
+        "select imports it; import it from Fixture, or add a glob in lakefile.toml (read from the trusted ref)"], out
+    from verifylab import leanmod
+    monkeypatch.setattr(leanmod, "unbuilt", lambda *_: [])                  # the guard, disabled
+    rc, out, _ = vl(capsys, "validate")
+    assert unbuilt(out) == []
+
+
+@pytest.mark.parametrize("lakefile", ['globs = ["Fixture.*"]\n', 'globs = ["Fixture", "Fixture.Orphan"]\n',
+                                      'roots = ["Fixture", "Fixture.Orphan"]\n'])
+def test_a_module_the_globs_select_builds(research_repo, monkeypatch, capsys, lakefile):
+    root = research_repo
+    monkeypatch.chdir(root)
+    _library(root, lakefile)
+    rc, out, _ = vl(capsys, "validate")
+    assert rc == 0 and unbuilt(out) == [], out
+
+
+def test_submodule_globs_leave_out_the_root_module(research_repo, monkeypatch, capsys):
+    root = research_repo
+    monkeypatch.chdir(root)
+    _library(root, 'globs = ["Fixture.+"]\n')                  # Lake: `A.+` is the submodules of A, not A
+    rc, out, _ = vl(capsys, "validate")
+    assert [w.split(":")[0] for w in unbuilt(out)] == ["WARNING Fixture.lean"], out
+
+
+def test_a_lakefile_lean_decides_over_lakefile_toml(research_repo, monkeypatch, capsys):
+    root = research_repo
+    monkeypatch.chdir(root)
+    (root / "lakefile.lean").write_text("import Lake\nopen Lake DSL\npackage fixture\n"
+                                        "lean_lib Fixture where\n  globs := #[.andSubmodules `Fixture]\n")
+    _library(root, "")                                          # Lake reads lakefile.lean when both are there
+    rc, out, _ = vl(capsys, "validate")
+    assert rc == 0 and unbuilt(out) == [], out
+
+
+def test_an_unreadable_module_says_nothing(research_repo, monkeypatch, capsys):
+    root = research_repo
+    monkeypatch.chdir(root)
+    _library(root, "")
+    (root / "Fixture" / "Basic.lean").chmod(0)
+    try:
+        rc, out, _ = vl(capsys, "validate")
+    finally:
+        (root / "Fixture" / "Basic.lean").chmod(0o644)
+    assert rc == 0 and unbuilt(out) == [], out
+
+
+def test_the_lakefile_of_the_trusted_ref_decides(research_repo, monkeypatch, capsys):
+    root = research_repo
+    monkeypatch.chdir(root)
+    _library(root, "")
+    (root / "lakefile.toml").write_text((root / "lakefile.toml").read_text() + 'globs = ["Fixture.*"]\n')
+    rc, out, _ = vl(capsys, "validate")
+    assert len(unbuilt(out)) == 1, out
+    commit_all(root, "build every module")
+    rc, out, _ = vl(capsys, "validate")
+    assert unbuilt(out) == [], out
+
+
+@pytest.mark.parametrize("lakefile", ['globs = [{ submodules = "Fixture" }]\n', "srcDir = 3\n",
+                                      'srcDir = "../elsewhere"\n'])
+def test_a_lakefile_read_without_confidence_says_nothing(research_repo, monkeypatch, capsys, lakefile):
+    root = research_repo
+    monkeypatch.chdir(root)
+    _library(root, lakefile)
+    rc, out, _ = vl(capsys, "validate")
+    assert rc == 0 and unbuilt(out) == [], out
+
+
+def test_lake_globs_and_library_defaults():
+    from verifylab.leanmod import LeanLib, glob_matches, lean_libraries
+    # Lake/Load/Toml.lean: `A.*` is A and its submodules (andSubmodules), `A.+` its submodules only (submodules).
+    assert [glob_matches(g, m) for g, m in [("A", "A"), ("A", "A.B"), ("A.+", "A"), ("A.+", "A.B.C"), ("A.*", "A"),
+                                             ("A.*", "A.B"), ("A.*", "AB"), ("A.+", "AB")]] == [True, False, False,
+                                                                                               True, True, True,
+                                                                                               False, False]
+    assert lean_libraries(b'srcDir = "src"\n[[lean_lib]]\nname = "A"\n[[lean_lib]]\nname = "B"\nroots = ["B", "C"]\n'
+                          b'srcDir = "lib"\n') == [LeanLib("A", ("A",), ("A",), "src"),
+                                                   LeanLib("B", ("B", "C"), ("B", "C"), "src/lib")]

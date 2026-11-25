@@ -125,8 +125,10 @@ def commit_all(root: Path, message: str = "update") -> None:
 
 
 def write_machine(tools: dict[str, str] | None = None, elan_home: str | None = None,
-                  caches: dict[str, str] | None = None, check: dict[str, str] | None = None) -> Path:
-    """Write this test's machine.toml (under its own XDG_CONFIG_HOME) and return its path."""
+                  caches: dict[str, str] | None = None, check: dict[str, str] | None = None,
+                  queue: dict | None = None, sandbox: str | None = None) -> Path:
+    """Write this test's machine.toml (under its own XDG_CONFIG_HOME) and return its path. Its queue keeps no free
+    floor unless `queue` sets one, so a busy machine never makes a test wait."""
     from verifylab import machine
     path = machine.config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -137,6 +139,9 @@ def write_machine(tools: dict[str, str] | None = None, elan_home: str | None = N
     lines += ["", "[caches]", *(f"{json.dumps(k)} = {json.dumps(v)}" for k, v in (caches or {}).items())]
     if check:
         lines += ["", "[check]", *(f"{k} = {json.dumps(v)}" for k, v in check.items())]
+    if sandbox:
+        lines += ["", "[sandbox]", f"class = {json.dumps(sandbox)}"]
+    lines += ["", "[queue]", *(f"{k} = {json.dumps(v)}" for k, v in {"keep_free": "0", **(queue or {})}.items())]
     path.write_text("\n".join(lines) + "\n")
     return path
 
@@ -175,11 +180,51 @@ def pinned_tools(tmp_path_factory) -> dict[str, str]:
 
 @pytest.fixture(autouse=True)
 def machine_home(tmp_path_factory, monkeypatch, pinned_tools):
-    """Every test has its own XDG config and data homes, never the real ~/.config/verifylab. Its machine.toml names
-    the pinned tools the Lean tests use, since a protected check takes them from there, pinned, and never from
-    COMPARATOR_*."""
+    """Every test has its own XDG config, data and state homes (the last holds the job queue), never the real
+    ~/.config/verifylab. Its machine.toml names the pinned tools the Lean tests use, since a protected check takes
+    them from there, pinned, and never from COMPARATOR_*."""
     base = tmp_path_factory.mktemp("xdg")
     monkeypatch.setenv("XDG_CONFIG_HOME", str(base / "config"))
     monkeypatch.setenv("XDG_DATA_HOME", str(base / "data"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(base / "state"))
+    monkeypatch.delenv("VL_QUEUE_JOB", raising=False)
     write_machine(pinned_tools, elan_home=lean_elan_home())
     return base
+
+
+def kill_wrapper_midway(wrapper_argv: list[str], pidfile: Path) -> int:
+    """Run `cli.main(wrapper_argv)` in a forked process whose command writes its pid to `pidfile`, SIGKILL that
+    process once the command runs, and return the command's pid: the command outlives its `vl` wrapper."""
+    import multiprocessing
+    import signal
+    import time
+    from verifylab import cli
+    wrapper = multiprocessing.get_context("fork").Process(target=lambda: os._exit(cli.main(wrapper_argv)))
+    wrapper.start()
+    deadline = time.monotonic() + 30
+    while not (pidfile.exists() and pidfile.read_text().endswith("\n")):
+        assert time.monotonic() < deadline and wrapper.is_alive(), "the command never started"
+        time.sleep(0.02)
+    os.kill(wrapper.pid, signal.SIGKILL)
+    wrapper.join(10)
+    return int(pidfile.read_text())
+
+
+def assert_place_outlives_wrapper(command_pid: int) -> None:
+    """The one slot of the queue stays taken while the orphaned command runs, and frees when it ends."""
+    import signal
+    import time
+    from verifylab import queue
+    q = queue.Queue.from_machine()
+    try:
+        assert len(queue.state(q).running) == 1
+        try:
+            queue.admit("next", max_wait=0.2, queue=q)
+        except queue.QueueError:
+            pass
+        else:
+            raise AssertionError("the killed wrapper's place was given away while its command runs")
+    finally:
+        os.kill(command_pid, signal.SIGKILL)
+    with queue.admit("next", max_wait=10, queue=q):                # control: the command ended, the place is free
+        assert [j.label for j in queue.state(q).running] == ["next"]

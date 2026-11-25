@@ -1,275 +1,146 @@
 # VerifyLab
 
-`vl` keeps the records of formal and computational research in plain files in Git: questions and results,
-trusted Lean targets and Python evaluators, receipts of checks, and reviews. It is built for LLM agents working in
-parallel, and for the people who integrate their work. No server, no UI, no database of record: one command line,
-seven agent skills, and a [record format](docs/SPEC.md) that is usable without `vl`.
+Mathematics is done in community. VerifyLab helps people and agents understand, improve and create formal
+mathematics for a stated purpose. It leaves the work open so others can check it and continue, with a plain-text
+record of who did it, why, what they predicted, what it cost and what failed.
 
-**The promise: protected checks compare an answer with the committed question, and status distinguishes
-admitted evidence from exploratory or stale results.** What a result
-must prove is committed on a trusted ref; a check reads the question from there and only the answer from the
-worktree, runs in a jail, and writes a receipt bound to the digests of everything it read. Status is derived from
-receipts and reviews, never written. A receipt counts only once the integrator commits it on the trusted ref, and
-goes stale when any input changes.
+It is for one person working with agents, a research group, a company, or an agent coordinating thousands of
+others.
 
-**The limit: a process of the same user can write any file `vl` reads**, the repository and its records included.
-The integrator must run `vl validate --incoming BRANCH` and generate protected receipts with `vl check`:
-incoming validation rejects candidate-written receipts and changes or deletions of existing evidence and reviews.
-The receipt's self-hash checks content integrity; it does not authenticate who ran a checker or prove execution.
-`vl` does not make cheating impossible; it provides evidence for detecting it: a receipt can be re-run from a clean
-clone when the checked inputs have been preserved in Git and the recorded tool environment can be reconstructed
-(by hand today, below; automatic deep replay is planned), the
-trusted ref can be a protected branch on the forge that agents cannot push to, and the meaning of a target is
-judged by a reviewer started with a clean context. What `vl` itself never does is derive `verified` from what a
-worktree edit, an environment variable or a failed read can change; an alternate trust anchor (`--trusted-ref`, a
-machine policy moved by `XDG_*`) is named on the status it produces.
+VerifyLab provides a command-line tool (`vl`) and a plain-text convention in Git. It runs beside Lean, Lake
+(Lean's build and package manager) and Comparator (the Lean FRO's checker that compares a candidate proof against
+fixed statements and allowed axioms). Lean checks proofs. Comparator checks that the candidate proves the exact
+target statement with only permitted axioms. Nobody can make a result true by recording or approving it in
+VerifyLab.
 
-## A weakened statement is not a solution
+## Five-minute start
 
-Suppose the trusted target asks for a proof of `P`. A candidate instead proves `P ∨ True`, which is true
-regardless of `P`: the protected Lean check rejects the changed statement. If `P ∨ True` was already the
-trusted target, a proof can pass; statement probes warn about triviality, and a fidelity review must judge
-whether the target actually represents the intended problem.
-
-Statement probes can expose easy targets and contradictory premises. They do not establish whether a
-solution class inside a non-existence claim captures the intended problem. Cards show per-theorem
-premise-vacuity skip reasons; meaning review and suitably scoped test lemmas still matter.
-
-## Requirements
-
-- Linux, Python ≥ 3.11 (`vl` uses the standard library only), git.
-- bubblewrap (`bwrap`): every check, protected or exploratory, and every `vl lane exec` runs in its jail.
-- A working systemd user manager is required for protected Lean checks: an outer service enforces
-  Comparator's `RestrictAddressFamilies=~AF_UNIX`, with actual socket denial tested before each jailed command.
-  Without enforcement, the check stops with `error` or `unsupported`, never `pass`. For Python, exploratory checks and lane execution,
-  systemd supplies optional memory/task caps; without it those runs are uncapped, with a warning recorded.
-- For Lean: a toolchain installed with elan, and [Comparator](https://github.com/leanprover/comparator),
-  lean4export and landrun (Landlock, Linux ≥ 5.13), and nanoda, the second kernel: protected checks need it
-  while `[lean] external_kernels` is on (the default).
-- For Python checks: `/usr/bin/python3` (or another interpreter under a system folder).
-
-`vl` never downloads a toolchain, Lake package or verifier tool. A missing required tool or toolchain makes a
-check `unsupported`; an incomplete dependency build can instead produce `error`. Prepare the dependencies before
-checking.
-
-## Install
-
-See [INSTALL.md](docs/INSTALL.md) for the CLI installation, verifier build recipe and machine setup. The CLI and
-skills can be installed from a local checkout:
+Start in a VerifyLab checkout on Linux with Git, Python 3.11 or later and `uv`.
 
 ```sh
-uv tool install .                       # puts `vl` on PATH; templates and skills ship in the package
-ln -s "$PWD"/skills/vl-* ~/.claude/skills/   # the skills, for example for Claude Code
+uv tool install .
+export PATH="$(uv tool dir --bin):$PATH"
+vl --help
+vl attempts check examples/toy-attempts/attempts
+vl attempts table examples/toy-attempts/attempts
 ```
 
-## Set up a machine
+The toy example reports 2 open candidates and 0 problems. One candidate forecasts saving 2 to 4 source lines.
+You can read and check attempt files without installing Lean. For protected checks and a checkout-only invocation,
+see [Installation](docs/INSTALL.md).
 
-Protected checks take their tools from this machine only, never from the caller's `PATH` or `COMPARATOR_*`;
-the system programs `vl` starts (bubblewrap, systemd-run, env, git, ...) come from system folders by absolute path,
-or from `machine.toml` `[launchers]`:
+In your mathematics repository, write `PURPOSE.md`, commit a forecast for each candidate under `attempts/`, and
+commit the measured outcome after the work. Run `vl attempts check` and `vl attempts table` from that repository.
+See [Purpose and attempts](docs/PURPOSE-AND-ATTEMPTS.md).
 
-```sh
-vl init --tools --comparator PATH --lean4export PATH --landrun PATH [--nanoda PATH] [--toolchain TOOLCHAIN]
+## Limits
+
+VerifyLab does not prove theorems for you, it does not certify (Comparator does), and it gives no objective
+ranking: what is better depends on the purpose, and the purpose belongs to whoever does the work.
+
+## Workflows
+
+In an existing Lake project, start with its own Lake build and native Comparator for a frozen challenge.
+Add attempt files when you want to compare planned work with outcomes. Adopt `research/vl.toml` when the
+project wants VerifyLab's sealed receipts, review and admission.
+
+VerifyLab adds three workflows that can be used together or on their own:
+
+- **Plan and measure changes in any Git repository.** `PURPOSE.md` states what the work is for and what contract
+  must stay true. Record an attributed forecast before starting and add the measured outcome after the work.
+  `vl attempts check` validates the file and compares forecasts with the version committed before the first
+  recorded outcome in that file's Git history. `vl attempts table` compares forecasts against outcomes
+  for each forecaster. [The convention](docs/PURPOSE-AND-ATTEMPTS.md)
+- **Read a Lean checkout.** Pin a Lake checkout at a Git commit, read
+  the exact source signature of a theorem, get a budgeted reading order of declarations, and measure how many located source lines lose their last dependency path from the main theorems when a block
+  is removed from the supplied graph. [Lean checkout workflow](docs/FOREIGN.md)
+- **Check and coordinate results in a VerifyLab project.** Give each parallel agent an
+  isolated Git worktree with `vl lane new` and run their commands in the sandbox with `vl lane exec`. Compare
+  candidate proofs with targets read from a trusted Git ref, probe the target for statement traps, and keep a
+  sealed receipt. Review statement meaning independently. [More below](#the-verifier-around-leans-comparator)
+
+| Record | Use it for |
+|---|---|
+| `attempts/*.md` | Forecasts, reported outcomes and attributed scores in any Git repository. |
+| `*.trial.json` | Timings and build outcomes for a pinned patch trial run by `vl trial`. |
+| `research/items/*.md` and `research/evidence/` | Questions and results with protected receipts. Use `vl show ID` to read a result card. |
+
+To install the agent entry skill, run `vl init --skills codex` or `vl init --skills claude`. For Pi, pass its
+skill directory to `vl init --skills PATH`. Open a new agent session after installing and add this line to the
+project's `AGENTS.md`:
+
+```text
+For formal mathematics in this repository, load the `verifylab` skill and follow its route for your purpose.
 ```
 
-copies the binaries to `~/.local/share/verifylab/tools/<toolchain>/` and pins their sha256 in a `REVISIONS` file
-there (the toolchain defaults to the current repository's `lean-toolchain`). A protected check refuses any tool
-that is not pinned, or that changed since. Everything else machine-local goes in `~/.config/verifylab/machine.toml`
-(`templates/machine.toml` is a commented example): tool paths, `elan_home`, the built Lake directory of each
-project (`[caches]`), and `[check] memory_total`, the cap of all `vl` runs together (default 70% of RAM). The
-`XDG_CONFIG_HOME` and `XDG_DATA_HOME` of a call can point it at another machine file and tools store: a receipt
-records that, and a status it verifies says so.
+## Two prompts
 
-## Set up a project
+This example uses the bundled `Tiny` development as a local Git checkout. [Prepare the fixture](docs/FOREIGN.md#try-the-tiny-project)
 
-In a git repository, on the integrator's branch: `vl init` creates `research/` (items, targets, evidence,
-reviews, evaluators) and `research/vl.toml`, records the branch as the trusted ref in the repository's own
-`git config vl.trustedRef`, adds `.vl-cache/` to `.gitignore`, and prints a section for `AGENTS.md`
-(`--write-agents` appends it). Commit `research/`: `vl` reads `research/vl.toml` as committed on the trusted ref.
+**“What does Tiny.conclusion prove? Which assumption does the work?”**
 
-## How agents use it
+The agent runs `vl pin Tiny --at HEAD`, then `vl inspect vl.lock Tiny.conclusion`. Its source read starts with:
 
-The seven skills guide coordination, exploration, proofs, experiments, improvement, human understanding and
-fidelity review. External agents and their harness choose tasks and context; the harness launches agents. `vl`
-supplies records, search, compact cards and isolated workspaces. A **lane** is a separate Git worktree: each agent
-edits its own copy,
-and the integrator reviews and merges useful changes into the trusted branch.
-
-A person can use `vl-understand` for scientific dialogue: clarify a goal, ask which results matter for it,
-contribute an intuition, or discuss and refine an experiment against recorded attempts. Explanations adapt
-to the person; evidence and attributed human/agent appraisals remain distinct. Useful contributions stay
-in the project's existing records or notebook for later readers. The interaction happens through the
-external agent; `vl` provides the local evidence and records.
-The cost of reproducing a whole result does not settle the value of a bounded contribution. Assess reusable
-lemmas, simpler certificates or application bridges against the goal, with reasons for pursuing or stopping.
-
-For a hard problem, the coordinator maintains a living Markdown plan in the project's chosen location: goals,
-hypotheses, alternative roads, why each intermediate result matters, abandoned roads and the next discriminating
-check. Link records and read their current status with `vl show`; the plan is reasoning, not a second status store.
-Review the meaning of important intermediate targets as well as the final result. A faithful review is an
-attributed judgement, and a verified lemma is not by itself evidence that the research strategy will succeed.
-Read `vl show ID --json` before a fidelity review and retain its `meaning_digest` and `trust.commit`.
-Read the target and definitions at that commit, then write the review with
-`vl review ID --kind fidelity --expected-meaning-digest DIGEST --verdict faithful --author agent:referee --text "REASON"`.
-A changed meaning rejects the write; reread it before judging. The digest binds the context, not understanding.
-
-Choose context for each task, including a deliberately small or independent start. Useful context includes
-lemmas with assumptions and limits, examples, unsuccessful attempts and source excerpts. Different agents can
-receive rich or sparse context, varied objectives/prompts or an invitation to find a new strategy; no amount of
-strategic reading or choice of model is prescribed. `vl show --brief` packs only the requested records; it does
-not retrieve linked sources or include the full relations and reviews sections. Add the relevant plan and dependency links yourself, and open full cards
-when needed. The default character budget is adjustable, not a limit on the agent's context window.
-
-After meaningful work, keep a dense note in the item or existing research plan: method or connection, conditions,
-result, remaining gap and useful next uses, with detail reachable by links. A short run retrospective can record
-which ideas helped and where attempts failed. These notes support later agents and the same agent after context
-compaction. Their interpretation and selection remain with the researcher.
-
-All seven skill names use the `vl-` prefix and apply to the current VerifyLab research project. `vl-improve`
-improves research results; toolkit/instruction fixes follow the contribution workflow. Optional appraisals can
-be prose in the body or notebook; a dedicated numeric rating/review interface is not implemented.
-
-## First run (five minutes, no Lean needed)
-
-On the Python fixture of this repository: an evaluator with the n-th prime as the question, and a candidate.
-
-```sh
-cd .. && cp -r verifylab/fixtures/python-planted/repo demo && cd demo   # next to the clone, not inside it
-rm research/vl.toml && git init -q -b main && vl init
-git add -A && git commit -qm "question, evaluator, candidate"
-vl check nth-prime        # protected pass, exit 0; writes research/evidence/nth-prime/<receipt>.json
-vl show nth-prime         # status pending-admission: the receipt is not on the trusted ref yet
-git add research && git commit -qm "admit the receipt"
-vl show nth-prime         # verified; fidelity: not reviewed
-vl show nth-prime --json > review-context.json  # retain this before reading the evaluator at trust.commit
-meaning_digest=$(python -c 'import json; print(json.load(open("review-context.json"))["items"][0]["meaning_digest"])')
-vl review nth-prime --kind fidelity --expected-meaning-digest "$meaning_digest" --verdict faithful --author human:you --text "CASES and judge test the n-th prime"
-git add research && git commit -qm "review the evaluator"
-cp -r ../verifylab/fixtures/python-planted/defects/wrong/experiments .   # a wrong candidate
-vl check nth-prime        # fail, exit 1, with the cases that did not pass
-vl show nth-prime         # verified-stale: the admitted pass no longer matches the candidate
-vl validate               # says which input changed
+```text
+Tiny.lean:5
+theorem conclusion (p : Prop) (certificate : p) : p
+Explicit binders: (p : Prop), (certificate : p)
 ```
 
-`fixtures/lean-planted` is the same exercise in Lean (it needs the Lean tools above).
+The caller already supplies a proof of `p` as the explicit argument `certificate`. The theorem returns a proof of
+that same proposition.
 
-## Re-running a receipt by hand
+**“Show me the route I would need to read before simplifying it.”**
 
-A receipt records the trusted commit it read the question from (`inputs.trusted_commit`) and the worktree's HEAD
-(`inputs.candidate_head`, with `candidate_uncommitted` listing checked files that were not committed). On a machine
-set up as above, **when the checked candidate files and item's answer binding were committed at that HEAD**:
+The agent runs `vl order --from Tiny --at HEAD --root Tiny.conclusion --budget 2`. Its entire reading packet is:
 
-```sh
-git clone <repository-url> replay && cd replay && git checkout <candidate_head>
-vl check ID --trusted-ref <trusted_commit> --json   # then compare verdict and inputs.digest with the receipt
+```text
+Tiny.conclusion
+theorem conclusion (p : Prop) (certificate : p) : p
+Tiny.step
+theorem step (p : Prop) (h : p) : p
 ```
 
-If the candidate was edited before the check and committed afterward, the recorded HEAD does not contain the
-checked bytes. Use a later commit that preserves them (often the commit admitting the receipt), verify every
-candidate input against `inputs.files` and the item's binding against `question_digest`, and run against the
-original `trusted_commit`. Committing the answer before checking gives the simpler replay recipe above.
-
-Limits: replay uses this machine's tools and build caches. Compare the recorded tool identities and dependency
-traces; changing tools or caches does not automatically stale an existing receipt. Lean verifier binaries are
-recorded by sha256; Python records its interpreter path and version. Files never preserved in Git cannot be
-reconstructed from a digest. Manual replay is not an automatic reproduction guarantee.
+Both signatures state the same obligation. Returning `certificate` directly is a candidate patch.
 
 ## Commands
 
-`--help` on any command lists its flags; `--json` prints versioned JSON (`vl.output/1`), before or after a lane
-action alike; `vl lane exec` passes its command's output and exit code through unchanged and refuses `--json`.
-Exit 2 is always a usage or setup problem, never a verdict.
-
-| Command | Does |
+| Command | What the agent gets |
 |---|---|
-| `vl init` | create `research/` and `research/vl.toml`, write `git config vl.trustedRef`; `--tools` sets up the machine |
-| `vl show ID[@rev]` | the result card: corrections, limits, statement, status, proof, meaning, evidence, reviews, relations; `--impact`; `--brief` targets `--budget N` characters (default 8,000), naming a source's file, never inlining it; mandatory headers can exceed the budget, with a warning |
-| `vl find TEXT` | search items and the project's Lean declarations, local only; source hits show their reference and access level; exit 1 when nothing matches |
-| `vl check ID` | run the item's checker and write a receipt; exit 0 pass, 1 fail, 3 error or unsupported; `--explore` never counts |
-| `vl review ID[@rev] --kind K` | record an immutable review: fidelity, compare, correction, retraction, understanding; new fidelity writes require `--expected-meaning-digest`; `--author human:NAME` only with `--human-approved` or a confirmation at the terminal |
-| `vl validate` | check records, references, receipts, reviews and targets, and warn on process state written into a record's prose and on target hypotheses its `assumptions` leave out; exit 1 on errors; `--incoming BRANCH` before a merge |
-| `vl lane new\|list\|exec\|close` | one git worktree per subagent, bound to its repository (sibling repositories never see each other's lanes); `exec` runs a command in the jail with the shared build cache read-only |
+| `vl pin` | A pinned checkout, toolchain and Lake dependency inventory (`vl.lock`). |
+| `vl inspect` | A pinned theorem or lemma source signature, its explicit binders (`(x : A)`) and source indicators, or a search for a declaration (`--find`), an item card (`--item`) or project records (`--search`). |
+| `vl graph` | Module imports, approximate source dependencies, dependency edges from supplied compiled Lean modules (`.olean` files), a graph dump (`--dump`), or a target rebuild estimate. |
+| `vl value` | Root-conditioned use and size, line-removal costs, block totals and study or simplification rankings (`--study`). |
+| `vl order` | A bounded reading packet of declaration names and signatures. Pass `--json` for source locations and ranking details. |
+| `vl trial` | Baseline and patched build outcomes for named targets using a chosen runner, optionally linked to an attempt file (`--attempt`). |
+| `vl attempts` | Scaffold a forecast (`new`), check its rules and Git commit order (`check`), or tabulate forecasts against outcomes (`table`). |
+| `vl check` | A sandboxed check of a bound item (or a clean-clone reproduction with `--replay`), recording the verdict, input digests, probes and tools used. |
+| `vl review` | An attributed judgment bound to an item revision and, for statement fidelity and paper correspondence, to the exact trusted meaning digest. |
+| `vl lane` | Isolated Git worktrees and read-only build-cache overlays (`new`, `list`, `exec`, `done`, `integrate`, `close`) for parallel agents. |
+| `vl init` / `new` / `status` / `show` / `find` / `validate` / `admit` / `replay` | Project setup, item scaffolding, repository triage, result cards, search, record validation, integrator admission and clean-clone receipt replay. |
 
-## Status labels
+Run `vl --help` for commands grouped by purpose and `vl docs GUIDE` for project records and administration.
+Use `vl export catalog OUT` to share a static HTML and JSON catalog of the results on a trusted ref.
+[Lean checkout workflow](docs/FOREIGN.md) · [Full command guide](docs/GUIDE.md)
 
-Derived on every read, from receipts and reviews committed on the trusted ref; never stored.
+## The verifier around Lean's Comparator
 
-| Status | Meaning |
-|---|---|
-| `verified` | an admitted protected pass whose inputs, question and answer included, are unchanged in the worktree and on the trusted ref; no newer admitted fail |
-| `vacuous` | such a pass, but the statement probes of an admitted pass of the same inputs derive `False` from a target theorem's hypotheses |
-| `verified-stale` | admitted protected passes exist, and an input of each has changed since |
-| `pending-admission` | a protected pass whose receipt is not committed on the trusted ref yet |
-| `explored` | exploratory passes only; they never verify |
-| `failed` | no pass and the newest check failed, or an admitted fail of the same inputs, newer or of the same instant, overrides a pass |
-| `check-error` | no pass and the newest check was inconclusive: a tool, a timeout, a malformed item |
-| `check-unsupported` | no pass and the newest check could not run: a missing tool (nanoda while `external_kernels` is on), toolchain or jail, or an item not on the trusted ref; a pass only the Lean kernel replayed counts as this |
-| `unverified` | a `formal` or `computation` result with no valid receipt |
-| `recorded-numeric`, `recorded-empirical`, `recorded-literature`, `recorded-prose` | a result of a claim kind `vl` does not check |
-| `open` | a conjecture, or a question with no verified answer |
-| `answered` | a question that a verified item `answers`; for a question with a Lean target, with the same target and theorems, and with a Python evaluator, the same evaluator and entry |
-| `refuted` | a result or conjecture that a verified item `refutes` |
-| `retracted` | an admitted retraction review |
-| `source`, `intuition`, `explanation` | items without a truth status: the label is their kind |
-| `undetermined` | `refutes` or `answers` relations form a cycle |
+The verifier calls Comparator—the Lean FRO's checker of a candidate against fixed statements and permitted
+axioms—as an external program. Lean v4.35.0 and later also ship `lake comparator`.
 
-Next to the status, the card shows the meaning of the target as a separate fact: the fidelity review (docs/SPEC.md).
-`answers`, `refutes` and `uses` are admitted assertions about relationships, not proofs of implication or negation.
-For a checker-bound question, `answered` also requires the same target/theorems or evaluator/entry; a prose-only
-question has no such mechanical contract. A `refuted` label does not itself certify a proof of the negation.
-A fidelity review binds what it read: the target and the definitions it imports, the theorems, the stable Lean
-semantic environment, and the item's
-statement, limits and assumptions; editing any of them makes it stale. The title and body explain and bind nothing.
-Cards, briefs and `--json` show the statement, limits and assumptions as committed on the trusted ref, the text the
-status and fidelity hold for; a worktree that says otherwise is shown apart, labelled "uncommitted edit, not
-reviewed", and `vl validate` warns when the item is verified.
+VerifyLab reads the target statements and their in-project definitions from a trusted Git ref, runs Comparator in a
+no-network sandbox, and keeps a sealed receipt bound to a revision and the input hashes. Alongside Comparator,
+it runs statement probes for targets closed by basic automation, contradictory Prop hypotheses and small
+`Nat` boundary values. It also flags set-theoretic foundation constants and totalized operations such as division
+by zero, which Lean defines with a fallback value. In a separate fidelity review, a reader reviews what the
+statement means.
 
-## What a check proves
+### What a protected pass means
 
-**Now, the fast check** (`vl check ID`, protected): for Lean, Comparator, in the jail, on a fresh project whose
-target and in-project definitions come from the trusted ref: same statement, identical definitions, permitted
-axioms only, replay by the Lean kernel and, while `[lean] external_kernels` is on (the default), by nanoda: a
-machine without it gets `unsupported`, and a pass that only Lean's kernel replayed does not count. After a pass,
-statement probes
-look for targets that automation alone closes or whose hypotheses it refutes, and command lints flag what can
-change meaning in the files the candidate changed. For Python, the candidate and the trusted evaluator's judge run
-in two separate jails; every case must pass.
-
-## Roadmap
-
-**The deep check is planned** (there is no `--deep` flag): a clean rebuild without shared caches,
-mutation of the conclusion, reproduction of every committed receipt from a clean clone at the trusted commit, and
-a toolchain and kernel version floor.
-
-Further coordination commands, shared build-cache improvements and imports from external research platforms
-remain future work. The current CLI is the command table above. Agents can already keep reduction and obligation
-records, maintain their research plan and review intermediate targets with the existing skills and commands.
-
-## Documentation
-
-- [INSTALL.md](docs/INSTALL.md): installation, verifier tools and machine setup.
-- [CONTRIBUTING.md](CONTRIBUTING.md): development loop and evidence required for changes.
-- [SECURITY.md](SECURITY.md): threat model, trust boundaries, reporting and replay limits.
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): contract, trust model, the protected check step by step, modules.
-- [docs/SPEC.md](docs/SPEC.md): the `research/` format: items, targets, receipts, reviews, derived status.
-- [docs/CHEATS.md](docs/CHEATS.md): every known way a result can look verified without being so, and what catches it.
-- [docs/adr/](docs/adr/): decisions. [CHANGELOG.md](CHANGELOG.md). [AGENTS.md](AGENTS.md): agent contribution rules.
-- `skills/`: `vl-orient` (next move, fan-out, integration), `vl-explore`, `vl-prove`, `vl-experiment`,
-  `vl-improve`, `vl-understand`, `vl-referee` (a clean-context reviewer of a target's meaning).
-
-## License
-
-VerifyLab is licensed under [Apache-2.0](LICENSE). Comparator's known-answer projects under
-`fixtures/comparator-known/` retain their upstream [LICENSE](fixtures/comparator-known/LICENSE) and
-[NOTICE](fixtures/comparator-known/NOTICE). The Castor name, marks and signature artwork have separate
-terms in [NOTICE](NOTICE).
-
-<p>
-  <a href="https://abcastor.com">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="docs/castor-footer-dark.svg">
-      <source media="(prefers-color-scheme: light)" srcset="docs/castor-footer-light.svg">
-      <img src="docs/castor-footer-light.png" width="800" alt="Chip, the Castor beaver, by Castor, we give a dam">
-    </picture>
-  </a>
-</p>
+For a newly issued protected Lean pass, Comparator checks the candidate against a target fixed on the trusted Git
+ref. The receipt records agreement on the covered declarations and definitions, permitted axioms, and acceptance by
+both Lean's kernel and `nanoda` (an independent kernel for Lean). Once the integrator commits the receipt
+on the trusted ref, the admitted current receipt counts toward the item's derived status (`check passed` in human
+views, `verified` in JSON). For Python items, a pass means the trusted evaluator accepted the candidate in a
+separate sandbox on every recorded test case. Statement fidelity and correspondence with a paper are separate rows
+on the verdict ladder and require their own reviews. [Evidence contract](docs/SPEC.md)

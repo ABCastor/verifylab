@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
-# Build the verifier revisions exercised by the fixtures, then pin their binaries with vl init --tools.
+# Build the verifier revisions reviewed for one Lean toolchain, then pin their binaries with vl init --tools.
+# The toolchain defaults to the fixture's (v4.34.0-rc2); --toolchain SPEC selects another reviewed one.
 # --offline requires the four source checkouts and compiler dependency caches to be prepared already.
 set -euo pipefail
 
 offline=0
-if [[ ${1:-} == --offline ]]; then
-    offline=1
-    shift
-fi
-if (($# != 1)); then
-    echo 'usage: scripts/install-tools.sh [--offline] ABSOLUTE_BUILD_DIRECTORY' >&2
+toolchain=
+while (($# > 1)); do
+    case $1 in
+        --offline) offline=1; shift ;;
+        --toolchain) toolchain=$2; shift 2 ;;
+        *) break ;;
+    esac
+done
+if (($# != 1)) || [[ ${1:-} == --* ]]; then
+    echo 'usage: scripts/install-tools.sh [--offline] [--toolchain SPEC] ABSOLUTE_BUILD_DIRECTORY' >&2
     exit 2
 fi
 repo=$(cd "$(dirname "$0")/.." && pwd -P)
@@ -25,15 +30,23 @@ if [[ $build == "$repo" || $build == "$repo/"* ]]; then
     exit 2
 fi
 
-comparator_rev=19e111e2141cf333c7daff0f64c5f24acc91dd2e
-export_rev=cacf989bd75f608700820f6afc595f32e7a99a4d
+if [[ -z $toolchain ]]; then
+    toolchain=$(tr -d '\r\n' < "$repo/fixtures/lean-planted/lean-toolchain")
+fi
+# Reviewed source pins per Lean toolchain. landrun and nanoda do not depend on Lean, so they keep one pin.
 landrun_rev=811cfff51ceaf3d9843708aa6d22e9b84ccac8b4
 nanoda_rev=4c544ed4099c8227f07d5de77ad1e69fb0740a27
-toolchain=$(tr -d '\r\n' < "$repo/fixtures/lean-planted/lean-toolchain")
-if [[ $toolchain != leanprover/lean4:v4.34.0-rc2 ]]; then
-    echo 'install-tools: update and verify the source pins before changing the fixture toolchain' >&2
-    exit 2
-fi
+case $toolchain in
+    leanprover/lean4:v4.34.0-rc2)
+        comparator_rev=19e111e2141cf333c7daff0f64c5f24acc91dd2e
+        export_rev=cacf989bd75f608700820f6afc595f32e7a99a4d ;;
+    leanprover/lean4:v4.34.1)
+        comparator_rev=19e111e2141cf333c7daff0f64c5f24acc91dd2e
+        export_rev=cacf989bd75f608700820f6afc595f32e7a99a4d ;;
+    *)
+        echo "install-tools: no reviewed source pins for $toolchain; test Comparator and lean4export on it, then add a case" >&2
+        exit 2 ;;
+esac
 for command in git elan go cargo uv; do
     command -v "$command" >/dev/null || { echo "install-tools: missing $command" >&2; exit 2; }
 done

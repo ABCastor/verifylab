@@ -304,7 +304,7 @@ def _short(value: Any, limit: int = 60) -> str:
 @functools.cache
 def _bwrap_version() -> str:
     try:
-        proc = subprocess.run([jail.program("bwrap") or "bwrap", "--version"], capture_output=True, text=True,
+        proc = subprocess.run([jail.program("bwrap"), "--version"], capture_output=True, text=True,
                               timeout=10)
         return proc.stdout.strip() or "unknown"
     except (OSError, subprocess.SubprocessError):

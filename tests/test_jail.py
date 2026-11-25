@@ -32,6 +32,17 @@ def test_secrets_never_cross(pattern, name):
     assert jail.filter_env({"PATH": "/usr/bin", name: "x"}, ["PATH", name]) == {"PATH": "/usr/bin"}
 
 
+def test_a_jail_without_bubblewrap_refuses_instead_of_looking_it_up_in_the_path(tmp_path: Path, monkeypatch):
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    (fake / "bwrap").write_text("#!/bin/sh\nexec \"$@\"\n")
+    (fake / "bwrap").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake}:/usr/bin:/bin")
+    monkeypatch.setattr(jail, "program", lambda name: None)
+    with pytest.raises(RuntimeError, match="bubblewrap .* not installed"):
+        jail.Jail(workdir=tmp_path).argv(["true"])
+
+
 def _run(tmp_path: Path, code: str, **kw):
     box = jail.Jail(workdir=tmp_path, env=jail.filter_env(os.environ, jail.DEFAULT_ENV), **kw)
     return jail.run(box, [system_python(), "-c", code], timeout=30)
@@ -46,12 +57,17 @@ def test_files_outside_the_jail_and_the_network_are_out_of_reach(tmp_path: Path)
     secret.write_text("planted-secret")
     work = tmp_path / "work"
     work.mkdir()
+    # A workdir under the real home needs synthetic parent directories inside the namespace.
+    home = Path.home()
+    identity = home.stat()
     with socket.create_server(("127.0.0.1", 0)) as server:
         port = server.getsockname()[1]
         probe = (
             "import os, socket\n"
             f"print(open({str(secret)!r}).read() if os.path.exists({str(secret)!r}) else 'hidden')\n"
-            f"print(os.path.isdir({str(Path.home())!r}))\n"
+            f"home = {str(home)!r}\n"
+            "st = os.stat(home) if os.path.isdir(home) else None\n"
+            f"print(st is not None and (st.st_dev, st.st_ino) == {(identity.st_dev, identity.st_ino)!r})\n"
             "s = socket.socket()\n"
             "s.settimeout(2)\n"
             f"try:\n    s.connect(('127.0.0.1', {port})); print('net')\n"
@@ -105,6 +121,26 @@ def test_stream_reads_the_peak_memory_of_its_scope(tmp_path: Path):
     run = jail.stream(box, [system_python(), "-c", code], timeout=60, memory_max="2G")
     assert run.returncode == 0, run.stderr
     assert run.memory_peak is not None and 200 * 2**20 <= run.memory_peak < 2 * 2**30, run.memory_peak
+
+
+@pytest.mark.parametrize("deny_unix", [False, True])
+def test_the_peak_of_a_run_is_its_units_anonymous_memory(tmp_path: Path, monkeypatch, deny_unix):
+    """The basis of the job queue's usage (queue.state): page cache, which memory.peak also counts, is left out."""
+    unit = tmp_path / "unit"
+    unit.mkdir()
+    (unit / "memory.peak").write_text(f"{8 << 30}\n")                    # anon + page cache
+    (unit / "memory.stat").write_text(f"anon {1 << 30}\nfile {7 << 30}\n")
+    command = ["/bin/sh", "-c", "echo up; sleep 0.3"]
+    monkeypatch.setattr(jail, "available", lambda: True)
+    monkeypatch.setattr(jail, "memory_capped", lambda argv, *caps: command)
+    monkeypatch.setattr(jail, "guarded_service", lambda argv, *rest: command)
+    monkeypatch.setattr(jail, "_scope_cgroup", lambda pid: unit, raising=False)
+    monkeypatch.setattr(jail, "_service_cgroup", lambda name: unit)
+    box = jail.Jail(workdir=tmp_path, deny_unix=deny_unix)
+    run = jail.stream(box, ["true"], timeout=10, memory_max="2G")
+    assert run.returncode == 0 and run.memory_peak == 1 << 30
+    (unit / "memory.stat").unlink()                                       # control: nothing readable, no peak
+    assert jail.stream(box, ["true"], timeout=10, memory_max="2G").memory_peak is None
 
 
 @bwrap
@@ -174,6 +210,24 @@ def test_comparator_service_refuses_unenforced_restriction(tmp_path, monkeypatch
 
 
 @bwrap
+def test_cancel_stops_a_run_that_closed_its_output(tmp_path, monkeypatch):
+    """A command that closes its output and keeps working is still stopped by `cancel` (a failed preflight, the end
+    of the check), not only by the deadline; the control, nothing cancels, runs to its end."""
+    import threading
+    monkeypatch.setattr(jail.Jail, "argv", lambda self, command: list(command))
+    monkeypatch.setattr(jail, "memory_capped", lambda argv, *args, **kwargs: list(argv))
+    quiet = ["/bin/sh", "-c", "exec >/dev/null 2>&1; sleep 30"]
+    cancel = threading.Event()
+    threading.Timer(0.3, cancel.set).start()
+    start = time.monotonic()
+    done = jail.stream(jail.Jail(workdir=tmp_path), quiet, timeout=60, cancel=cancel, poll=0.05)
+    assert done.returncode is None and time.monotonic() - start < 10
+    done = jail.stream(jail.Jail(workdir=tmp_path), ["/bin/sh", "-c", "exec >/dev/null 2>&1; sleep 0.3; exit 4"],
+                       timeout=60, cancel=threading.Event(), poll=0.05)
+    assert done.returncode == 4                                                    # control
+
+
+@bwrap
 @pytest.mark.parametrize("close_output", [False, True])
 def test_comparator_service_deadline_kills_children_and_unloads_unit(tmp_path, close_output):
     code = ("import os, time\n"
@@ -221,6 +275,57 @@ def test_comparator_service_preserves_main_exit_while_reaping_children(tmp_path,
     assert result.returncode == exit_code and result.stdout == b"completed\n", result
     time.sleep(2.2)
     assert not marker.exists()
+
+
+def test_service_report_is_split_off_and_names_a_result_that_is_not_the_commands():
+    unit = "run-vl-0123.service"
+    report = (b"          Finished with result: timeout\n"
+              b"Main processes terminated with: code=exited, status=0/SUCCESS\n"
+              b"               Service runtime: 79ms\n                   Memory peak: 3.1M (swap: 0B)\n")
+    err, why = jail._service_end(b"Running as unit: " + unit.encode() + b"; invocation ID: 9f\nown\n" + report, unit, 1)
+    assert err == b"own\n" and "result 'timeout'" in why and "status=0/SUCCESS" in why and "exit status 1" in why
+    for result in (b"success", b"exit-code"):                                     # the exit status is the command's
+        assert jail._service_end(b"own\n" + report.replace(b"timeout", result), unit, 0) == (b"own\n", None)
+    killed = report.replace(b"timeout", b"signal").replace(b"exited, status=0/SUCCESS", b"killed, status=9/KILL")
+    assert "result 'signal'" in jail._service_end(killed, unit, 255)[1]           # 255 is systemd's, not 128 + 9
+    forged = report + b"printed by the command after a forged report\n"         # only a report at the very end
+    assert jail._service_end(forged, unit, 1) == (forged, None)
+
+
+@bwrap
+@pytest.mark.parametrize("force_stop_timeout", [True, False])
+def test_a_stop_timeout_after_a_clean_exit_is_named_as_systemds(tmp_path, monkeypatch, force_stop_timeout):
+    """A clean main exit can still end in a service timeout when a child ignores the stop signal.
+    A finite stop deadline plants that result. The normal SIGKILL cleanup is the zero-exit control."""
+    service = jail.guarded_service
+    code = ("import os, signal\nread, write = os.pipe()\nif os.fork() == 0:\n"
+            "    signal.signal(signal.SIGTERM, signal.SIG_IGN); os.close(read); os.close(write); signal.pause()\n"
+            "    os._exit(0)\nos.close(write); os.read(read, 1)\nprint('All targets up-to-date', flush=True)\n")
+    def leftover(argv, unit, *rest):                      # no bwrap: its namespace would take the child down with it
+        out = service([system_python(), "-c", code], unit, *rest)
+        if force_stop_timeout:
+            out[out.index("KillSignal=SIGKILL")] = "KillSignal=SIGTERM"
+            out[out.index("TimeoutStopSec=1s")] = "TimeoutStopSec=100ms"
+        return out
+    monkeypatch.setattr(jail, "guarded_service", leftover)
+    run = jail.stream(jail.Jail(workdir=tmp_path, deny_unix=True), ["true"], timeout=20)
+    assert run.stdout == b"All targets up-to-date\n", run
+    if force_stop_timeout:
+        assert run.returncode == 1 and "result 'timeout'" in run.service and "status=0/SUCCESS" in run.service, run
+        assert run.stderr == f"vl: {run.service}\n".encode()
+    else:
+        assert (run.returncode, run.service, run.stderr) == (0, None, b""), run
+
+
+@bwrap
+def test_the_memory_cap_of_a_guarded_service_is_named(tmp_path):
+    """systemd stops the whole service when the OOM killer fires in it and systemd-run exits 1, not 128 + 9: without
+    its report a memory kill looked like a normal exit 1."""
+    code = "import time; b = bytearray(512 * 2**20); time.sleep(1); print('survived')"
+    run = jail.stream(jail.Jail(workdir=tmp_path, deny_unix=True), [system_python(), "-c", code], timeout=30,
+                      memory_max="128M")
+    assert run.returncode == 1 and b"survived" not in run.stdout, run
+    assert "result 'oom-kill': the memory cap was reached" in run.service, run
 
 
 @bwrap
@@ -281,3 +386,117 @@ def test_service_stop_nonzero_status_is_an_error(monkeypatch):
                         subprocess.CompletedProcess(args[0], 1, "", "injected manager refusal"))
     with pytest.raises(RuntimeError, match="injected manager refusal"):
         jail._stop_service("run-vl-test.service")
+
+
+@bwrap
+def test_stream_selector_error_unwinds_and_stops_only_owned_unit(tmp_path: Path, monkeypatch):
+    """Planted: an exception inside the selector loop unwinds stream(), kills its client and stops only its own
+    systemd unit; a concurrent unrelated service unit stays active (control)."""
+    import selectors
+    import secrets
+    unrelated = f"run-vl-unrelated-{secrets.token_hex(6)}.service"
+    systemctl = jail.program("systemctl")
+    systemd_run = jail.program("systemd-run")
+    other = subprocess.Popen([systemd_run, "--user", "--wait", "--collect", f"--unit={unrelated}", "--",
+                              system_python(), "-c", "import time; time.sleep(30)"],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    units: list[str] = []
+    real_service = jail.guarded_service
+    def capture_service(argv, unit, *rest):
+        units.append(unit)
+        return real_service(argv, unit, *rest)
+    monkeypatch.setattr(jail, "guarded_service", capture_service)
+    real_select = selectors.DefaultSelector.select
+    seen_data = False
+    def exploding_select(self, timeout=None):
+        nonlocal seen_data
+        events = real_select(self, timeout)
+        if events and seen_data:
+            raise RuntimeError("injected selector failure")
+        if events:
+            seen_data = True
+        return events
+    monkeypatch.setattr(selectors.DefaultSelector, "select", exploding_select)
+    try:
+        code = "import time; print('line1', flush=True); time.sleep(0.2); print('line2', flush=True); time.sleep(30)"
+        with pytest.raises(RuntimeError, match="injected selector failure"):
+            jail.stream(jail.Jail(workdir=tmp_path, deny_unix=True), [system_python(), "-c", code], timeout=30)
+        assert len(units) == 1
+        assert subprocess.run([systemctl, "--user", "is-active", units[0]], capture_output=True).returncode != 0
+        assert subprocess.run([systemctl, "--user", "is-active", unrelated], capture_output=True).returncode == 0
+    finally:
+        for unit in units:
+            subprocess.run([systemctl, "--user", "stop", unit], capture_output=True)
+        subprocess.run([systemctl, "--user", "stop", unrelated], capture_output=True)
+        other.wait(timeout=5)
+        other.stdout.close()
+        other.stderr.close()
+
+
+@bwrap
+def test_stream_sigterm_stops_only_owned_service_unit(tmp_path: Path):
+    """SIGTERM in a child running stream() stops its owned unit and leaves unrelated units alive."""
+    import secrets
+    import signal
+    import sys
+    unrelated = f"run-vl-unrelated-{secrets.token_hex(6)}.service"
+    systemctl = jail.program("systemctl")
+    systemd_run = jail.program("systemd-run")
+    other = subprocess.Popen([systemd_run, "--user", "--wait", "--collect", f"--unit={unrelated}", "--",
+                              system_python(), "-c", "import time; time.sleep(30)"],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    unit_file = tmp_path / "owned.unit"
+    script = (f"from pathlib import Path\n"
+              f"from verifylab import jail\n"
+              f"real = jail.guarded_service\n"
+              f"def cap(argv, unit, *rest):\n"
+              f"    Path({str(unit_file)!r}).write_text(unit)\n"
+              f"    return real(argv, unit, *rest)\n"
+              f"jail.guarded_service = cap\n"
+              f"jail.stream(jail.Jail(workdir=Path({str(tmp_path)!r}), deny_unix=True),\n"
+              f"            [{system_python()!r}, '-c', \"import time; print('up', flush=True); time.sleep(30)\"],\n"
+              f"            timeout=60)\n")
+    child = subprocess.Popen([sys.executable, "-c", script], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    owned = None
+    try:
+        deadline = time.monotonic() + 20
+        while not unit_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert unit_file.exists()
+        owned = unit_file.read_text().strip()
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            if subprocess.run([systemctl, "--user", "is-active", owned], capture_output=True).returncode == 0:
+                break
+            time.sleep(0.05)
+        os.kill(child.pid, signal.SIGTERM)
+        child.wait(timeout=15)
+        assert child.returncode != 0
+        assert subprocess.run([systemctl, "--user", "is-active", owned], capture_output=True).returncode != 0
+        assert subprocess.run([systemctl, "--user", "is-active", unrelated], capture_output=True).returncode == 0
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=5)
+        child.stdout.close()
+        child.stderr.close()
+        if owned:
+            subprocess.run([systemctl, "--user", "stop", owned], capture_output=True)
+        subprocess.run([systemctl, "--user", "stop", unrelated], capture_output=True)
+        other.wait(timeout=5)
+        other.stdout.close()
+        other.stderr.close()
+
+
+def test_stop_owned_leaves_unregistered_units_alone(monkeypatch):
+    """stop_owned() only calls _stop_service on units registered as owned by this process."""
+    stopped = []
+    monkeypatch.setattr(jail, "_stop_service", lambda u: stopped.append(u))
+    with jail._OWNED_LOCK:
+        jail._OWNED_UNITS.add("run-vl-mine.service")
+    try:
+        jail.stop_owned()
+        assert stopped == ["run-vl-mine.service"]
+    finally:
+        with jail._OWNED_LOCK:
+            jail._OWNED_UNITS.discard("run-vl-mine.service")

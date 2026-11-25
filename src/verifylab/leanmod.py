@@ -240,9 +240,10 @@ def _word_at(text: str, i: int) -> tuple[str, int]:
 _BODY_IMPORT = re.compile(r"(?m)^[ \t]*(?:public[ \t]+)?(?:meta[ \t]+)?import[ \t\n]")
 
 
-def parse_header(text: str) -> Header:
+def parse_header(text: str, check_body: bool = True) -> Header:
     """Parse the import header. Raises LeanModError on anything not certainly understood, including an
-    `import` line after the header (Lean rejects it; we refuse to guess what was meant)."""
+    `import` line after the header (Lean rejects it; we refuse to guess what was meant) unless `check_body` is off:
+    reading the import graph alone does not scan the body."""
     # A byte-order mark is skipped, never removed: every offset in the Header is one in `text` as given, which is
     # what the rewriting functions apply them to.
     i = end = 1 if text[:1] == "﻿" else 0
@@ -281,6 +282,8 @@ def parse_header(text: str) -> Header:
             raise LeanModError(f"unsupported module name {name!r}")
         imports.append(Import(name, start, after, public, meta, imp_all))
         i = end = after
+    if not check_body:
+        return Header(module_kw, prelude, tuple(imports), end)
     body = mask_comments_and_strings(text[end:])
     stray = _BODY_IMPORT.search(body)
     if stray:
@@ -389,12 +392,22 @@ class TheoremDecl:
     private: bool
     line: int
     body: tuple[int, int] | None    # span of `sorry` / `by sorry` when the body is exactly that
+    span: tuple[int, int]           # complete source command, including its proof
+    kind: str = "theorem"           # the command keyword: theorem or lemma; def, abbrev or instance for the reader
 
 
+_READING_SECTION = re.compile(r"^(?:@\[[^\]]*\]\s*)*(?:(?:public|noncomputable)\s+)*section(?=\s|$)")
 _DECL = re.compile(
     r"^(?:@\[[^\]]*\]\s*)*"
     r"(?P<mods>(?:(?:private|protected|public|noncomputable|unsafe|partial|nonrec)\s+)*)"
     r"(?P<kw>theorem|lemma)\s+(?P<name>[^\s:(\[{.]+(?:\.[^\s:(\[{.]+)*)(?:\.\{[^}]*\})?"
+)
+# The foreign reader also indexes definitions, abbreviations and named instances. Never used for a trusted target.
+_READING_DECL = re.compile(
+    r"^(?:@\[[^\]]*\]\s*)*"
+    r"(?P<mods>(?:(?:private|protected|public|noncomputable|unsafe|partial|nonrec|meta|scoped|local)\s+)*)"
+    r"(?P<kw>theorem|lemma|def|abbrev|instance)\s+(?:\(priority\s*:=[^()]*\)\s*)?"
+    r"(?P<name>[^\s:(\[{.]+(?:\.[^\s:(\[{.]+)*)(?:\.\{[^}]*\})?"
 )
 _SORRY_BODY = re.compile(r":=\s*(?P<body>(?:by\s+)?sorry)\s*\Z")
 
@@ -417,11 +430,23 @@ def find_theorems(text: str) -> dict[str, list[TheoremDecl]]:
     `end X`. Anything else is reported as a parse problem by the caller, never guessed."""
     header = parse_header(text)
     masked = mask_comments_and_strings(text)
+    return theorem_spans(masked, header.end)
+
+
+def theorem_spans(masked: str, offset: int, *, reading: bool = False) -> dict[str, list[TheoremDecl]]:
+    """Index a masked Lean file once, preserving original source offsets and qualified names. With `reading`, for the
+    foreign reader only: sections may run to the end of the file, and `def`, `abbrev` and named `instance` commands
+    are indexed beside theorems and lemmas."""
+    previous, line = 0, 1
     scopes: list[tuple[str, list[str]]] = []          # (kind, name components)
     found: dict[str, list[TheoremDecl]] = {}
-    for s, e in _chunks(masked, header.end):
+    for s, e in _chunks(masked, offset):
+        line += masked.count("\n", previous, s)
+        previous = s
         chunk = masked[s:e]
         words = chunk.split()
+        if reading and (section := _READING_SECTION.match(chunk)):
+            words = ["section", *chunk[section.end():].split()]
         head = words[0] if words else ""
         if head == "namespace" and len(words) > 1:
             name = words[1]
@@ -445,7 +470,7 @@ def find_theorems(text: str) -> dict[str, list[TheoremDecl]]:
             if name and name.split(".") != parts:
                 raise LeanModError(f"`end {name}` closes {kind} {'.'.join(parts) or '(anonymous)'}")
             continue
-        match = _DECL.match(chunk)
+        match = (_READING_DECL if reading else _DECL).match(chunk)
         if not match:
             continue
         local = match.group("name")
@@ -460,8 +485,12 @@ def find_theorems(text: str) -> dict[str, list[TheoremDecl]]:
         sorry = _SORRY_BODY.search(chunk.rstrip())
         if sorry:
             body = (s + sorry.start("body"), s + sorry.end("body"))
-        decl = TheoremDecl(full, "private" in match.group("mods").split(), text[:s].count("\n") + 1, body)
+        decl = TheoremDecl(full, "private" in match.group("mods").split(), line, body, (s, e), match.group("kw"))
         found.setdefault(full, []).append(decl)
+    if reading:
+        # Lean closes sections at EOF. Require explicit ends for namespaces and mutual groups.
+        while scopes and scopes[-1][0] == "section":
+            scopes.pop()
     if scopes:
         kind, parts = scopes[-1]
         raise LeanModError(f"{kind} {'.'.join(parts) or '(anonymous)'} is never closed")
@@ -518,3 +547,69 @@ def lakefile_options(lakefile_toml: bytes | None, roots: tuple[str, ...]) -> tup
             if root in lib_roots and lib.get("leanOptions"):
                 per_root[root] = dict(lib["leanOptions"])
     return dict(package), per_root, "lakefile.toml"
+
+
+# Lake libraries --------------------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class LeanLib:
+    name: str
+    roots: tuple[str, ...]          # these and their submodules are local
+    globs: tuple[str, ...]          # what `lake build <name>` builds, with every module they import
+    src_dir: str                    # relative to the Lean project: the package's srcDir, then the library's
+
+    def is_local(self, module: str) -> bool:
+        """Lake's isLocalModule: roots and any additional modules matched by globs."""
+        return in_roots(module, self.roots) or any(glob_matches(glob, module) for glob in self.globs)
+
+
+
+def lean_libraries(lakefile_toml: bytes) -> list[LeanLib]:
+    """The `[[lean_lib]]` targets of a lakefile.toml, with Lake's defaults: roots are the name, globs the roots.
+    LeanModError when a field is not what Lake reads (a glob table, say): nothing is guessed."""
+    import posixpath
+    import tomllib
+
+    try:
+        data = tomllib.loads(lakefile_toml.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise LeanModError(f"lakefile.toml: {exc}") from exc
+
+    def field(table: dict, key: str, default: Any, kind: type) -> Any:
+        value = table.get(key, default)
+        if not isinstance(value, kind) or kind is list and not all(isinstance(v, str) for v in value):
+            raise LeanModError(f"lakefile.toml: {key} is not a {'list of strings' if kind is list else 'string'}")
+        return value
+
+    libraries = []
+    for lib in data.get("lean_lib", []):
+        if not isinstance(lib, dict):
+            raise LeanModError("lakefile.toml: lean_lib is not an array of tables")
+        name = field(lib, "name", None, str)
+        roots = tuple(field(lib, "roots", [name], list))
+        globs = tuple(field(lib, "globs", list(roots), list))
+        src = posixpath.join(field(data, "srcDir", ".", str), field(lib, "srcDir", ".", str))
+        libraries.append(LeanLib(name, roots, globs, posixpath.normpath(src)))
+    return libraries
+
+
+def glob_matches(glob: str, module: str) -> bool:
+    """Lake's module globs (Lake/Load/Toml.lean): `A` is A, `A.*` A and its submodules, `A.+` its submodules only."""
+    if glob.endswith(".*"):
+        return module == glob[:-2] or module.startswith(glob[:-1])
+    if glob.endswith(".+"):
+        return module.startswith(glob[:-1])
+    return module == glob
+
+
+def unbuilt(library: LeanLib, modules: Mapping[str, str], read: Callable[[str], bytes]) -> list[str]:
+    """Modules of `library` (under its roots) that `lake build` of it leaves out: no module its globs select imports
+    them, directly or transitively. `modules` maps each module of the project to its file, which `read` reads."""
+    built: set[str] = set()
+    queue = [m for m in modules if any(glob_matches(g, m) for g in library.globs)]
+    while queue:
+        module = queue.pop()
+        if module not in built and module in modules:
+            built.add(module)
+            queue += parse_header(decode(read(modules[module]), modules[module]), check_body=False).modules
+    return sorted(m for m in modules if in_roots(m, library.roots) and m not in built)

@@ -317,3 +317,58 @@ def test_admitted_resealed_pass_without_coverage_is_rejected(research_repo):
     status = _status(root)
     assert status.label == "unverified"
     assert any("rejected receipt" in n and "checked.kernels" in n for n in status.notes)
+
+
+def test_t0_single_kernel_new_profile_never_passes_even_when_external_kernels_is_false(research_repo):
+    """T0: Even if [lean] external_kernels = false is set in config, newly issued profiles without nanoda still count
+    as single_kernel (never as pass), while a historical-profile single-kernel pass keeps its verified status."""
+    from verifylab.config import RULES_INPUT
+    from verifylab.records import canonical_json, sha256_hex
+    from verifylab.status import single_kernel
+
+    root = research_repo
+    cfg_path = root / "research" / "vl.toml"
+    cfg_path.write_text(cfg_path.read_text().replace('roots = ["Fixture"]',
+                                                   'roots = ["Fixture"]\nexternal_kernels = false'))
+    commit_all(root, "disable external_kernels in historical style")
+    repo = Repo.open(root)
+    assert repo.config.lean.external_kernels is False
+
+    base = {"adapter": "lean-comparator", "assurance": "protected", "verdict": "pass",
+            "environment": {}, "inputs": {"files": {"Fixture/Basic.lean": "a" * 64}, "trusted_files": {}}}
+    historical = {**base, "inputs": {"trusted_files": {"research/vl.toml": "b" * 64}},
+                  "checked": {"kernels": ["lean"]}}
+    modern_rules = {**base, "inputs": {"trusted_files": {RULES_INPUT: "b" * 64}},
+                    "checked": {"kernels": ["lean"]}}
+    modern_ident = {**base, "environment": {"packages": {"identity": {"revisions": {}, "traces": {}}}},
+                    "checked": {"kernels": ["lean"]}}
+
+    assert single_kernel(repo, historical) is False
+    assert single_kernel(repo, modern_rules) is True
+    assert single_kernel(repo, modern_ident) is True
+    assert single_kernel(repo, {**modern_rules, "checked": {"kernels": ["lean", "nanoda"]}}) is False
+
+    # End-to-end status derivation: historical single-kernel receipt committed on trusted keeps verified + coverage label
+    _write_receipt(root)
+    path = next((root / "research/evidence/add-zero").glob("*.json"))
+    import json
+    data = json.loads(path.read_text())
+    trusted = {k: v for k, v in data["inputs"]["trusted_files"].items() if k != RULES_INPUT}
+    trusted["research/vl.toml"] = sha256_hex((root / "research/vl.toml").read_bytes())
+    data["inputs"]["trusted_files"] = trusted
+    basis = {"files": data["inputs"]["files"], "trusted_files": trusted, "target": data["target"]}
+    data["inputs"]["digest"] = "sha256:" + sha256_hex(canonical_json(basis).encode())
+    data["environment"].pop("packages", None)
+    data["checked"] = {**{k: v for k, v in data["checked"].items() if k not in ("definitions_mode", "probe_run")},
+                       "kernels": ["lean"]}
+    path.unlink()
+    data = seal_receipt(data)
+    write_new_json(path.parent / f"{data['receipt_id'][:16]}.json", data)
+    commit_all(root, "historical single-kernel pass")
+    st = _status(root)
+    assert st.label == "verified" and "single-kernel" not in " ".join(st.notes)
+    from verifylab.catalog import build
+    from verifylab.repo import TrustedRepo
+    entry = next(e for e in build(TrustedRepo.open(root))["items"] if e["id"] == "add-zero")
+    ext_row = next(r for r in entry["ladder"] if r["row"] == "second_kernel")
+    assert ext_row["state"] == "not assessed"

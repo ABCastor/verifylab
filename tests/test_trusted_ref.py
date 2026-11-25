@@ -77,7 +77,7 @@ def test_an_explicit_trusted_ref_option_overrides_git_config(research_repo, monk
     commit_all(root, "lane receipt")
     monkeypatch.chdir(root)
     assert "status: pending-admission" in vl(capsys, "show", "add-zero")[1]
-    assert "status: verified" in vl(capsys, "show", "add-zero", "--trusted-ref", "lane/y")[1]
+    assert "status: check passed" in vl(capsys, "show", "add-zero", "--trusted-ref", "lane/y")[1]
 
 
 def test_the_worktree_config_is_never_used_for_verdicts(research_repo, monkeypatch, capsys):

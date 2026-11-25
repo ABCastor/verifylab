@@ -1,0 +1,42 @@
+Resolving dependencies
+Building Challenge
+⚠ [2/3] Replayed Challenge
+warning: Challenge.lean:3:8: declaration uses `sorry`
+warning: Challenge.lean:4:8: declaration uses `sorry`
+warning: Challenge.lean:5:8: declaration uses `sorry`
+Build completed successfully (3 jobs).
+Exporting #[Probe.goal, Nat.add, Nat.sub, Nat.mul, Nat.pow, Nat.gcd, Nat.div, Nat.mod, Nat.beq, Nat.ble, Nat.land, Nat.lor, Nat.xor, Nat.shiftLeft, Nat.shiftRight, String.ofList, Char.ofNat, List, eagerReduce, Nat, String, String.mk, Char, optParam, autoParam, semiOutParam, outParam] from Challenge
+Building Good
+Build completed successfully (3 jobs).
+Exporting #[Probe.goal, Nat.add, Nat.sub, Nat.mul, Nat.pow, Nat.gcd, Nat.div, Nat.mod, Nat.beq, Nat.ble, Nat.land, Nat.lor, Nat.xor, Nat.shiftLeft, Nat.shiftRight, String.ofList, Char.ofNat, List, eagerReduce, Nat, String, String.mk, Char, optParam, autoParam, semiOutParam, outParam] from Good
+Running Lean paranoid kernel on solution
+Lean paranoid kernel accepts the solution
+Running lean4lean kernel on solution
+checked 464 declarations
+lean4lean kernel accepts the solution
+Running nanoda kernel on solution
+nanoda kernel rejected the solution
+Running con-leche kernel on solution
+con-leche: accepted 464 declarations (--verified)
+con-leche kernel accepts the solution
+Running con-ron kernel on solution
+con-ron: accepted 464 declarations (--verified)
+con-ron kernel accepts the solution
+Running Lean default kernel on solution
+Lean default kernel accepts the solution
+
+--- stderr ---
+
+thread 'thread_1' (4) panicked at src/tc.rs:230:13:
+declaration not found in infer_const, propext
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'thread_2' (5) panicked at src/tc.rs:230:13:
+declaration not found in infer_const, propext
+
+thread 'thread_3' (6) panicked at src/tc.rs:230:13:
+declaration not found in infer_const, propext
+
+thread 'main' (2) panicked at src/tc.rs:173:26:
+A thread in `check_all_declars` panicked while being joined: Any { .. }
+error: nanoda exited with 101

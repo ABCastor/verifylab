@@ -7,19 +7,38 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import tempfile
 import tomllib
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
+
+from .config import PROTECTED_EXTERNAL_KERNELS, RULES_INPUT
 
 ITEM_KINDS = ("question", "result", "conjecture", "source", "intuition", "explanation")
 CLAIM_TYPES = ("formal", "computation", "numeric", "empirical", "literature", "prose")
 SOURCE_ACCESS = ("full-text-read", "abstract-only", "citation-only", "secondary")
-REVIEW_KINDS = ("fidelity", "compare", "correction", "retraction", "understanding")
-# Statement-probe findings a fidelity review can accept as intended (the target is closed by automation alone).
-ACKNOWLEDGEABLE = ("trivial",)
+REVIEW_KINDS = ("fidelity", "compare", "correction", "retraction", "understanding", "correspondence", "appraisal")
+# Reviews that bind the meaning they read (the target, its definitions, the statement): a change of any of them
+# makes the review stale.
+MEANING_KINDS = ("fidelity", "correspondence")
+# How the formal statement relates to the paper's (ADR 0013): the same, a stronger one, a weaker one, another.
+CORRESPONDENCE_OUTCOMES = ("same", "stronger", "weaker", "different")
+STATEMENT_CHARS = 200
+# Where a statement comes from (ADR 0014): declared by the item's author, never checked and never read by status.
+PROVENANCE_KINDS = ("upstream-reviewed", "lab-authored", "model-authored", "own")
+SOURCE_REQUIRED = ("upstream-reviewed", "lab-authored")     # kinds that must say where the statement is from
+PROVENANCE_KEYS = ("kind", "source")
+ORIGIN_KEYS = ("agent", "model", "context", "tokens", "from", "inspired_by")
+# Items created after this date should say how they came to be (`[origin]`) and, with a target, where the statement
+# comes from (`[provenance]`): `vl validate` warns when they do not. Older items are never asked.
+ORIGIN_ASKED_AFTER = "2026-10-11"
+# Statement-probe findings a fidelity review answers for: `trivial` (the target is meant to be closed by automation
+# alone), `foundations` (it read what the statement says about Choice and the set theory it works in).
+ACKNOWLEDGEABLE = ("trivial", "foundations")
 VERDICTS = ("pass", "fail", "error", "unsupported")
 ASSURANCE = ("protected", "exploratory")
 
@@ -40,8 +59,13 @@ _LIST_FIELDS = ("assumptions", "limits", "uses", "cites", "supersedes", "answers
 _ID_LIST_FIELDS = ("uses", "cites", "supersedes", "answers", "refutes")
 _ITEM_KEYS = {
     "id", "kind", "title", "author", "recorded_by", "created", "statement", "claim",
-    "ref", "access", "lean", "python", *_LIST_FIELDS,
+    "ref", "access", "lean", "python", "provenance", "origin", "imports", *_LIST_FIELDS,
 }
+IMPORT_KEYS = frozenset({"package", "item", "item_revision", "module", "theorems", "receipt", "fidelity_review"})
+_FORBIDDEN_IMPORT_KEYS = frozenset({"url", "repo", "repository", "commit", "rev", "subDir", "subdir", "branch", "tag"})
+_PACKAGE_RE = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9._-]*$")
+_HEX_SHA_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _REQUIRED_BY_KIND = {
     "question": ("statement",),
     "result": ("statement", "claim"),
@@ -53,11 +77,49 @@ _REQUIRED_BY_KIND = {
 
 
 class RecordError(ValueError):
-    """A record is malformed. The message names the file and the field."""
+    """An invalid record or input, with its location and recovery when available."""
+
+    def __init__(self, message: str, *, has_recovery: bool = False):
+        super().__init__(message)
+        self.has_recovery = has_recovery
 
 
 def canonical_json(data: Any) -> str:
     return json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def pretty_json(data: Any) -> str:
+    """The text of a record or export file: indented, keys sorted, a final newline."""
+    return json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+
+
+def toml_str(text: str) -> str:
+    return json.dumps(text, ensure_ascii=False).replace("\x7f", "\\u007f")
+
+
+def toml_list(values) -> str:
+    return "[" + ", ".join(toml_str(v) for v in values) + "]"
+
+
+def timestamp(raw: Any) -> float | None:
+    """POSIX seconds of a recorded ISO 8601 time (without a zone, UTC), None when it is not one."""
+    try:
+        moment = datetime.fromisoformat(raw)
+    except (TypeError, ValueError):
+        return None
+    return (moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)).timestamp()
+
+
+def wall_seconds(receipt: dict[str, Any]) -> float | None:
+    """How long a receipt's run took (`finished_at` - `started_at`); None when either time is not one or the run ends
+    before it starts."""
+    start, end = timestamp(receipt.get("started_at")), timestamp(receipt.get("finished_at"))
+    return end - start if start is not None and end is not None and end >= start else None
+
+
+def bad_statement(kind: str, text: str) -> bool:
+    """Whether `text` is not a correspondence review's `statement`: one non-empty line of at most STATEMENT_CHARS."""
+    return kind != "correspondence" or not text.strip() or len(text) > STATEMENT_CHARS or "\n" in text
 
 
 def sha256_hex(data: bytes) -> str:
@@ -94,6 +156,9 @@ class Item:
     tags: tuple[str, ...] = ()
     lean: dict[str, Any] = field(default_factory=dict)
     python: dict[str, Any] = field(default_factory=dict)
+    provenance: dict[str, Any] = field(default_factory=dict)
+    origin: dict[str, Any] = field(default_factory=dict)
+    imports: tuple[dict[str, Any], ...] = ()
 
 
 def split_front_matter(text: str, where: str) -> tuple[str, str]:
@@ -122,6 +187,125 @@ def _list_field(meta: dict[str, Any], key: str, where: str) -> tuple[str, ...]:
     if not isinstance(value, list) or not all(isinstance(v, str) and v.strip() for v in value):
         raise RecordError(f"{where}: '{key}' must be a list of non-empty strings")
     return tuple(value)
+
+
+def _line(value: Any) -> bool:
+    """A non-blank, single-line, printable string: the card and the catalog show these words, and a newline or an
+    escape sequence in them could pass for another line of the card."""
+    return isinstance(value, str) and bool(value.strip()) and value.isprintable()
+
+
+def _text_in(table: dict[str, Any], key: str, where: str, name: str) -> None:
+    if key in table and not _line(table[key]):
+        raise RecordError(f"{where}: {name}.{key} must be a non-empty single line of printable text")
+
+
+def _provenance_table(meta: dict[str, Any], where: str) -> dict[str, Any]:
+    """`[provenance]`: `kind` (PROVENANCE_KINDS) and `source`, required for the kinds in SOURCE_REQUIRED."""
+    table = meta.get("provenance", {})
+    if not isinstance(table, dict):
+        raise RecordError(f"{where}: 'provenance' must be a table")
+    unknown = sorted(set(table) - set(PROVENANCE_KEYS))
+    if unknown:
+        raise RecordError(f"{where}: unknown provenance field(s) {unknown}; valid fields: {sorted(PROVENANCE_KEYS)}")
+    if "provenance" in meta and table.get("kind") not in PROVENANCE_KINDS:
+        raise RecordError(f"{where}: provenance.kind must be one of {PROVENANCE_KINDS}")
+    _text_in(table, "source", where, "provenance")
+    if table and table["kind"] in SOURCE_REQUIRED and "source" not in table:
+        raise RecordError(f"{where}: a {table['kind']} statement needs provenance.source (a URL, commit or path)")
+    return dict(table)
+
+
+def _origin_table(meta: dict[str, Any], where: str) -> dict[str, Any]:
+    """`[origin]`: who made the item and from what. `agent` is required once the table exists; `tokens` is a count;
+    `from` lists the items it came from (ids, checked like relations), `inspired_by` anything else (free text)."""
+    table = meta.get("origin", {})
+    if not isinstance(table, dict):
+        raise RecordError(f"{where}: 'origin' must be a table")
+    unknown = sorted(set(table) - set(ORIGIN_KEYS))
+    if unknown:
+        raise RecordError(f"{where}: unknown origin field(s) {unknown}; valid fields: {sorted(ORIGIN_KEYS)}")
+    if "origin" in meta and "agent" not in table:
+        raise RecordError(f"{where}: origin needs 'agent' ('human:<name>' or 'agent:<name>')")
+    if "agent" in table and not (_line(table["agent"]) and AUTHOR_RE.match(table["agent"])):
+        raise RecordError(f"{where}: origin.agent must look like 'human:<name>' or 'agent:<name>'")
+    for key in ("model", "context"):
+        _text_in(table, key, where, "origin")
+    if "tokens" in table and (type(table["tokens"]) is not int or table["tokens"] < 0):
+        raise RecordError(f"{where}: origin.tokens must be a non-negative integer")
+    for key in ("from", "inspired_by"):
+        if key in table and (not isinstance(table[key], list) or not all(_line(v) for v in table[key])):
+            raise RecordError(f"{where}: origin.{key} must be a list of non-empty single lines of printable text")
+    bad = [v for v in table.get("from", []) if not ID_RE.match(v.split("@", 1)[0])]
+    if bad:
+        raise RecordError(f"{where}: origin.from holds invalid ids {bad} (put other pointers in inspired_by)")
+    return dict(table)
+
+
+def _imports_table(meta: dict[str, Any], where: str) -> tuple[dict[str, Any], ...]:
+    """Validate and normalize `[[imports]]` entries without adding editable repo/subdir/commit fields."""
+    if "imports" not in meta:
+        return ()
+    from . import leanmod
+
+    raw = meta["imports"]
+    if not isinstance(raw, list):
+        raise RecordError(f"{where}: 'imports' must be a list of tables ([[imports]])")
+    seen: set[tuple[str, str, str]] = set()
+    normalized: list[dict[str, Any]] = []
+    for idx, entry in enumerate(raw):
+        loc = f"{where}: imports[{idx}]"
+        if not isinstance(entry, dict):
+            raise RecordError(f"{loc} must be a table")
+        forbidden = sorted(_FORBIDDEN_IMPORT_KEYS & set(entry))
+        if forbidden:
+            raise RecordError(
+                f"{loc} cannot set {', '.join(forbidden)} (repository, subdirectory and commit come from the resolved lake-manifest.json entry)"
+            )
+        unknown = sorted(set(entry) - IMPORT_KEYS)
+        if unknown:
+            raise RecordError(f"{loc} has unknown field(s) {unknown}; valid fields: {sorted(IMPORT_KEYS)}")
+        missing = sorted(IMPORT_KEYS - set(entry))
+        if missing:
+            raise RecordError(f"{loc} missing required field(s) {missing}")
+        pkg = entry["package"]
+        if not _line(pkg) or not _PACKAGE_RE.fullmatch(pkg):
+            raise RecordError(f"{loc}.package must be a valid Lake package name")
+        src_item = entry["item"]
+        if not _line(src_item) or not ID_RE.match(src_item):
+            raise RecordError(f"{loc}.item '{src_item}' must match {ID_RE.pattern}")
+        item_rev = entry["item_revision"]
+        if not isinstance(item_rev, str) or not _HEX_SHA_RE.fullmatch(item_rev):
+            raise RecordError(f"{loc}.item_revision must be a full 40- or 64-hex Git blob sha")
+        module = entry["module"]
+        if not _line(module) or not leanmod.is_valid_module_name(module) or leanmod.is_reserved(module):
+            raise RecordError(f"{loc}.module '{module}' must be a valid non-reserved Lean module name")
+        theorems = entry["theorems"]
+        if (not isinstance(theorems, list) or not theorems
+                or not all(_line(t) and leanmod.is_valid_decl_name(t) for t in theorems)):
+            raise RecordError(f"{loc}.theorems must be a non-empty list of valid Lean declaration names")
+        if len(set(theorems)) != len(theorems):
+            raise RecordError(f"{loc}.theorems must not contain duplicate declarations")
+        receipt = entry["receipt"]
+        if not isinstance(receipt, str) or not _SHA256_RE.fullmatch(receipt):
+            raise RecordError(f"{loc}.receipt must be a full 64-hex receipt_id")
+        fid_review = entry["fidelity_review"]
+        if not isinstance(fid_review, str) or not _SHA256_RE.fullmatch(fid_review):
+            raise RecordError(f"{loc}.fidelity_review must be a full 64-hex review_id")
+        key = (pkg, src_item, module)
+        if key in seen:
+            raise RecordError(f"{loc} duplicates import ({pkg}, {src_item}, {module})")
+        seen.add(key)
+        normalized.append({
+            "package": pkg,
+            "item": src_item,
+            "item_revision": item_rev,
+            "module": module,
+            "theorems": list(theorems),
+            "receipt": receipt,
+            "fidelity_review": fid_review,
+        })
+    return tuple(normalized)
 
 
 def parse_item(data: bytes, path: str) -> Item:
@@ -194,13 +378,21 @@ def parse_item(data: bytes, path: str) -> Item:
         recorded_by=recorded_by,
         lean=dict(meta.get("lean", {})),
         python=dict(meta.get("python", {})),
+        provenance=_provenance_table(meta, where),
+        origin=_origin_table(meta, where),
+        imports=_imports_table(meta, where),
         **lists,
     )
 
 
-def question_fields(item: "Item") -> dict[str, dict[str, Any]]:
-    return {table: {key: getattr(item, table)[key] for key in keys if key in getattr(item, table)}
-            for table, keys in QUESTION_FIELDS.items()}
+def question_fields(item: "Item") -> dict[str, Any]:
+    fields: dict[str, Any] = {
+        table: {key: getattr(item, table)[key] for key in keys if key in getattr(item, table)}
+        for table, keys in QUESTION_FIELDS.items()
+    }
+    if item.imports:
+        fields["imports"] = [dict(entry) for entry in item.imports]
+    return fields
 
 
 def question_digest(item: "Item") -> str:
@@ -237,13 +429,23 @@ _RECEIPT_SHAPE = {
     "command": _ListOf(str),
     "question_digest": str,
     "target": dict,
-    "inputs": {"files": _MapOf(str), "trusted_files": _MapOf(str), "trusted_commit": str, "trusted_ref": str},
+    "inputs": {"files": _MapOf(str), "trusted_files": _MapOf(str), "trusted_commit": str, "trusted_ref": str,
+               "imports": _ListOf(dict)},
     "checked": {"kernels": _ListOf(str), "permitted_axioms": _ListOf(str), "probes": _MapOf(dict),
                 "probe_run": {"battery": _ListOf(str), "problems": _ListOf(str), "skipped": str}, "lints": list},
-    "extra": {"phases": _MapOf(_NUMBER), "seconds": _NUMBER, "memory_peak_bytes": _NUMBER,
-              "modules": _ListOf({"module": str, "ms": _NUMBER})},
+    "environment": {"host": {"sandbox_class": str, "kernel": str, "arch": str, "cpu_model": str, "cores": int,
+                             "ram_bytes": int},
+                    "environment_class": {"digest": str, "adapter": str, "assurance": str, "sandbox_class": str,
+                                          "arch": str, "kernel": str, "memory_cap": str, "toolchain": str,
+                                          "lean_version": str, "tools": _MapOf(str), "packages_identity": str,
+                                          "python_version": str, "bwrap": str},
+                    "build_cache": {"restored": _MapOf(str), "stored_keys": _MapOf(str)},
+                    "solution_build": {"key": str},
+                    "third_party_packages": _ListOf(str)},
+    "extra": {"phases": _MapOf(_NUMBER), "seconds": _NUMBER, "memory_peak_bytes": _NUMBER, "cpu_seconds": _NUMBER,
+              "queue_wait_seconds": _NUMBER, "modules": _ListOf({"module": str, "ms": _NUMBER})},
 }
-_REVIEW_SHAPE = {"verdict": str, "target_sha256": str, "target_path": str, "compare_with": str, "meaning_digest": str,
+_REVIEW_SHAPE = {"verdict": str, "statement": str, "target_sha256": str, "target_path": str, "compare_with": str, "meaning_digest": str,
                  "trusted_ref": str, "trusted_commit": str,
                  "meaning": {"semantic_environment": _MapOf(str), "semantic_environment_error": str,
                              "files": _MapOf(str), "theorems": _ListOf(str), "witnesses": _ListOf(str),
@@ -290,6 +492,19 @@ _RECEIPT_REQUIRED = {
 }
 
 
+def historical_kernel_profile(receipt: dict[str, Any]) -> bool:
+    """Whether a protected Lean receipt has a pre-minimum historical profile, identified strictly by its recorded
+    structure and config basis (never by a timestamp): lacks `#verdict-rules`, `environment.packages.identity`,
+    `checked.definitions_mode`, and `checked.probe_run`."""
+    inputs = receipt.get("inputs") if isinstance(receipt.get("inputs"), dict) else {}
+    trusted = inputs.get("trusted_files") if isinstance(inputs.get("trusted_files"), dict) else {}
+    env = receipt.get("environment") if isinstance(receipt.get("environment"), dict) else {}
+    packages = env.get("packages") if isinstance(env.get("packages"), dict) else {}
+    checked = receipt.get("checked") if isinstance(receipt.get("checked"), dict) else {}
+    return (RULES_INPUT not in trusted and "identity" not in packages
+            and "definitions_mode" not in checked and "probe_run" not in checked)
+
+
 def _protected_pass_problems(receipt: dict) -> list[str]:
     """A protected pass must record the provenance and coverage its adapter actually produces."""
     adapter = receipt["adapter"]
@@ -318,7 +533,31 @@ def _protected_pass_problems(receipt: dict) -> list[str]:
     path = target.get("path" if adapter == "lean-comparator" else "evaluator")
     if not isinstance(path, str) or path not in trusted or target.get("sha256") != trusted.get(path):
         problems.append("target identity and sha256 must match its inputs.trusted_files entry")
-    basis = {"files": inputs["files"], "trusted_files": trusted, "target": target}
+    basis: dict[str, Any] = {"files": inputs["files"], "trusted_files": trusted, "target": target}
+    if "imports" in inputs:
+        imp_list = inputs["imports"]
+        if not isinstance(imp_list, list) or not imp_list:
+            problems.append("inputs.imports must be a non-empty list when present")
+        else:
+            for idx, imp in enumerate(imp_list):
+                manifest = imp.get("manifest") if isinstance(imp, dict) else None
+                if (not isinstance(imp, dict)
+                        or not isinstance(imp.get("package"), str) or not _PACKAGE_RE.fullmatch(imp["package"])
+                        or not isinstance(imp.get("item"), str) or not ID_RE.match(imp["item"])
+                        or not isinstance(imp.get("item_revision"), str) or not _HEX_SHA_RE.fullmatch(imp["item_revision"])
+                        or not isinstance(imp.get("module"), str) or not imp["module"]
+                        or not isinstance(imp.get("theorems"), list) or not imp["theorems"]
+                        or not all(isinstance(t, str) and t.strip() for t in imp["theorems"])
+                        or not isinstance(imp.get("receipt"), str) or not _SHA256_RE.fullmatch(imp["receipt"])
+                        or not isinstance(imp.get("fidelity_review"), str) or not _SHA256_RE.fullmatch(imp["fidelity_review"])
+                        or not isinstance(manifest, dict)
+                        or not isinstance(manifest.get("url"), str) or not manifest["url"].strip()
+                        or not isinstance(manifest.get("rev"), str) or not _HEX_SHA_RE.fullmatch(manifest["rev"])
+                        or (manifest.get("subDir") is not None and not isinstance(manifest.get("subDir"), str))
+                        or not isinstance(imp.get("source_meaning_digest"), str)
+                        or not imp["source_meaning_digest"].startswith("sha256:")):
+                    problems.append(f"inputs.imports[{idx}] is malformed")
+            basis["imports"] = imp_list
     if inputs["digest"] != "sha256:" + sha256_hex(canonical_json(basis).encode("utf-8")):
         problems.append("inputs.digest does not match files, trusted_files and target")
     if adapter == "lean-comparator":
@@ -330,6 +569,9 @@ def _protected_pass_problems(receipt: dict) -> list[str]:
         kernels = checked.get("kernels")
         if not isinstance(kernels, list) or "lean" not in kernels:
             problems.append("protected Lean pass needs checked.kernels including lean")
+        elif (PROTECTED_EXTERNAL_KERNELS and not historical_kernel_profile(receipt)
+              and not any(k in kernels for k in PROTECTED_EXTERNAL_KERNELS)):
+            problems.append("protected Lean pass requires an external kernel (nanoda)")
         if not isinstance(checked.get("permitted_axioms"), list):
             problems.append("protected Lean pass needs checked.permitted_axioms")
         for key in ("toolchain", "lean_version"):
@@ -424,8 +666,17 @@ def review_problems(review: Any) -> list[str]:
         problems.append(f"kind '{review['kind']}' not in {REVIEW_KINDS}")
     if not AUTHOR_RE.match(review["author"]):
         problems.append("author must look like 'human:<name>' or 'agent:<name>'")
-    if not review["text"].strip():
+    if not review["text"].strip() and review["kind"] != "appraisal":
         problems.append("a review needs a reason in 'text'")
+    if review["kind"] == "appraisal":
+        from .appraisals import assessment_problems
+        problems += assessment_problems(review.get("assessment"), review["item"], review["item_revision"])
+        if set(review) - (set(_REVIEW_REQUIRED) | {"assessment"}):
+            problems.append("an appraisal review has unsupported fields")
+    elif "assessment" in review:
+        problems.append("assessment only applies to an appraisal review")
+    if "score" in review:
+        problems.append("score is supported only inside appraisal assessment.ratings")
     problems += _shape_problems(review, _REVIEW_SHAPE, "")
     if "acknowledges" in review:
         acknowledges = review["acknowledges"]
@@ -434,6 +685,14 @@ def review_problems(review: Any) -> list[str]:
         elif (not isinstance(acknowledges, list) or not acknowledges
               or not all(isinstance(a, str) and a in ACKNOWLEDGEABLE for a in acknowledges)):
             problems.append(f"'acknowledges' must be a non-empty list of {ACKNOWLEDGEABLE}")
+    if isinstance(review.get("statement"), str) and bad_statement(review["kind"], review["statement"]):
+        problems.append(f"'statement' is for a correspondence review: one non-empty line of at most "
+                        f"{STATEMENT_CHARS} characters")
+    if review["kind"] == "correspondence":
+        if review.get("verdict") not in CORRESPONDENCE_OUTCOMES:
+            problems.append(f"a correspondence review needs a 'verdict' in {CORRESPONDENCE_OUTCOMES}")
+        if "meaning" not in review:
+            problems.append("a correspondence review binds the meaning it read: 'meaning' is missing")
     try:
         if ("meaning" in review) != ("meaning_digest" in review) or ("meaning" in review and isinstance(
                 review["meaning"], dict) and review.get("meaning_digest") != "sha256:" + sha256_hex(
@@ -446,11 +705,17 @@ def review_problems(review: Any) -> list[str]:
     return problems
 
 
-def write_new_json(path: Path, data: dict[str, Any]) -> None:
-    """Records are immutable: refuse to overwrite an existing file."""
+def write_new_bytes(path: Path, data: bytes) -> None:
+    """Publish complete bytes at a new immutable destination on the same filesystem."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("x", encoding="utf-8") as handle:
-        handle.write(json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False) + "\n")
+    with tempfile.TemporaryDirectory(prefix=".vl-record-", dir=path.parent) as directory:
+        staged = Path(directory) / "record"
+        staged.write_bytes(data)
+        os.link(staged, path)
+
+
+def write_new_json(path: Path, data: dict[str, Any]) -> None:
+    write_new_bytes(path, pretty_json(data).encode("utf-8"))
 
 
 def seal_receipt(fields: dict[str, Any]) -> dict[str, Any]:

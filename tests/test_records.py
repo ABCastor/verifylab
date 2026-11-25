@@ -197,3 +197,55 @@ def test_disabling_protected_pass_validation_lets_the_bad_digest_through(monkeyp
     assert any("inputs.digest" in p for p in receipt_problems(receipt))
     monkeypatch.setattr(records, "_protected_pass_problems", lambda record: [])
     assert receipt_problems(receipt) == []
+
+
+def test_t0_new_profile_requires_external_kernel_without_any_date_cutoff(monkeypatch):
+    """T0: Newly issued protected Lean passes require an external kernel (nanoda), identified strictly by receipt
+    profile (never by a timestamp/date cutoff), while historical passes keep their profile acceptance."""
+    from verifylab import records
+    from verifylab.config import RULES_INPUT
+    from verifylab.records import canonical_json, historical_kernel_profile, sha256_hex
+
+    def with_single_kernel(profile: str, stamp: str):
+        r = _receipt(started_at=stamp, finished_at=stamp)
+        r["checked"]["kernels"] = ["lean"]
+        t_entry = {r["target"]["path"]: r["target"]["sha256"]}
+        if profile == "historical":
+            r["inputs"]["trusted_files"] = {**t_entry, "research/vl.toml": "b" * 64}
+            r["environment"].pop("packages", None)
+            r["checked"].pop("definitions_mode", None)
+            r["checked"].pop("probe_run", None)
+        elif profile == "modern-rules":
+            r["inputs"]["trusted_files"] = {**t_entry, RULES_INPUT: "b" * 64}
+        elif profile == "modern-identity":
+            r["inputs"]["trusted_files"] = {**t_entry, "research/vl.toml": "b" * 64}
+            r["environment"]["packages"] = {"dir": "/pkg", "identity": {"revisions": {}, "traces": {}}}
+        elif profile == "modern-defmode":
+            r["inputs"]["trusted_files"] = {**t_entry, "research/vl.toml": "b" * 64}
+            r["environment"].pop("packages", None)
+            r["checked"]["definitions_mode"] = "shared: target closure identical"
+        basis = {"files": r["inputs"]["files"], "trusted_files": r["inputs"]["trusted_files"], "target": r["target"]}
+        r["inputs"]["digest"] = "sha256:" + sha256_hex(canonical_json(basis).encode())
+        return seal_receipt(r)
+
+    # Historical profile with single kernel is still structurally valid regardless of timestamp (even 2099)
+    hist_future = with_single_kernel("historical", "2099-01-01T00:00:00+00:00")
+    assert historical_kernel_profile(hist_future) is True
+    assert receipt_problems(hist_future) == []
+
+    # Modern profiles with single kernel are ALWAYS rejected regardless of timestamp (even 2020)
+    for prof in ("modern-rules", "modern-identity", "modern-defmode"):
+        modern_old_date = with_single_kernel(prof, "2020-01-01T00:00:00+00:00")
+        assert historical_kernel_profile(modern_old_date) is False, prof
+        probs = receipt_problems(modern_old_date)
+        assert any("external kernel" in p and "nanoda" in p for p in probs), (prof, probs)
+        # Clean control: adding nanoda makes the modern receipt valid
+        modern_ok = dict(modern_old_date)
+        modern_ok["checked"] = {**modern_old_date["checked"], "kernels": ["lean", "nanoda"]}
+        assert receipt_problems(seal_receipt(modern_ok)) == []
+
+    # Planted guard-off check: disabling PROTECTED_EXTERNAL_KERNELS lets the modern single-kernel pass slip through
+    bad_modern = with_single_kernel("modern-rules", "2020-01-01T00:00:00+00:00")
+    assert receipt_problems(bad_modern)
+    monkeypatch.setattr(records, "PROTECTED_EXTERNAL_KERNELS", ())
+    assert receipt_problems(bad_modern) == []

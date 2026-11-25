@@ -21,7 +21,10 @@ class CheckRequest:
     timeout: float
     memory_max: str | None
     memory_total: str | None = None        # aggregate cap of all vl runs (the shared systemd slice)
+    threads: int | None = None             # CPUs the check may use (machine.Machine.threads); None: no limit given
     guards: frozenset[str] = frozenset()   # test-only: names of guards to DISABLE, to prove each one matters
+    historical_single_kernel: bool = False  # only while reproducing a recorded pre-minimum pass
+    require_external_kernels: bool = False  # True when `vl replay --contract recheck` enforces T0 on old config
 
 
 @dataclass

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 
 import pytest
 
-from verifylab import cli, machine
+from verifylab import cli, jobs, machine
 from verifylab.adapters.base import CheckOutcome
 from verifylab.commands import check
 from verifylab.records import receipt_problems, sha256_hex
@@ -240,7 +241,10 @@ def test_a_capped_check_records_its_limits(repo_with_lean, monkeypatch, capsys):
     _use(monkeypatch, FakeAdapter())
     monkeypatch.setattr(jail, "_scope_problem", lambda systemd_run: None)
     monkeypatch.setattr(jail, "program", lambda name: f"/usr/bin/{name}")
+    capped = []
+    monkeypatch.setattr(jail, "cap_job", lambda token, threads, memory_max: capped.append((threads, memory_max)))
     assert cli.main(["check", "add-zero", "--json"]) == 0
+    assert capped == [(machine.load().threads(), "16G")]       # the check's runs together: its CPUs and memory_max
     captured = capsys.readouterr()
     assert "memory cap" not in captured.err
     receipt = json.loads((repo_with_lean / json.loads(captured.out)["receipt"]).read_text())
@@ -286,3 +290,237 @@ def test_the_checkers_are_imported_not_looked_up_by_name():
     """A checker that fails to import is an error of vl itself, never a silently missing checker ("no checker")."""
     assert all(isinstance(adapter, type) for adapter in check.ADAPTERS)
     assert [a.name for a in check.load_adapters()] == ["lean-comparator", "python-eval"]
+
+
+# The machine's job queue ----------------------------------------------------------------------------------------
+
+LEAN = FakeAdapter.name
+
+
+class PeakAdapter(FakeAdapter):
+    def __init__(self, peak):
+        super().__init__()
+        self.peak = peak
+
+    def check(self, request):
+        outcome = super().check(request)
+        outcome.extra["memory_peak_bytes"] = self.peak
+        return outcome
+
+
+def test_a_check_waits_for_the_queue_and_its_receipt_records_the_wait(repo_with_lean, monkeypatch, capsys, tmp_path):
+    from types import SimpleNamespace
+
+    from verifylab import queue
+
+    write_machine(queue={"slots": 1, "default_reservation": "1"})
+    monkeypatch.setattr(queue, "slice_cgroup", lambda: tmp_path / "cgroup")
+    _use(monkeypatch, FakeAdapter())
+    clock = 0.0
+
+    def poll(seconds):
+        nonlocal clock
+        state = queue.state(queue.Queue.from_machine())
+        assert state.waiting == 1
+        assert [job.label for job in state.running] == ["another job"]
+        busy.release()
+        clock += seconds
+
+    monkeypatch.setattr(queue, "time", SimpleNamespace(monotonic=lambda: clock, time=lambda: clock, sleep=poll))
+    with queue.admit("another job") as busy:
+        assert cli.main(["check", "add-zero", "--json"]) == 0
+    captured = capsys.readouterr()
+    assert "vl: queue: vl check add-zero waits: all 1 slots are busy" in captured.err
+    receipt = json.loads((repo_with_lean / json.loads(captured.out)["receipt"]).read_text())
+    assert receipt_problems(receipt) == []
+    assert clock > 0 and receipt["extra"]["queue_wait_seconds"] == clock
+    assert cli.main(["check", "add-zero", "--json"]) == 0
+    captured = capsys.readouterr()
+    assert " waits:" not in captured.err
+    receipt = json.loads((repo_with_lean / json.loads(captured.out)["receipt"]).read_text())
+    assert receipt["extra"]["queue_wait_seconds"] == 0
+
+
+def test_a_check_that_waits_past_max_wait_never_runs(repo_with_lean, monkeypatch, capsys):
+    from verifylab import queue
+    write_machine(queue={"slots": 1})
+    _use(monkeypatch, FakeAdapter())
+    with queue.admit("another job"):
+        assert cli.main(["check", "add-zero", "--max-wait", "0.2"]) == 2
+    assert "did not start: all 1 slots are busy" in capsys.readouterr().err
+    assert FakeAdapter.seen == [] and not (repo_with_lean / "research" / "evidence").exists()
+
+
+def test_a_check_reserves_the_peak_of_the_last_admitted_or_exploratory_receipt(repo_with_lean, monkeypatch):
+    from verifylab import queue
+    reserved = []
+    admit = queue.admit
+    monkeypatch.setattr(queue, "admit", lambda label, reservation=None, max_wait=None: reserved.append(reservation)
+                        or admit(label, reservation, max_wait))
+    repo = lambda: Repo.open(repo_with_lean)                                       # noqa: E731
+    assert check.last_peak(repo(), "add-zero", LEAN) is None
+    _use(monkeypatch, PeakAdapter(3 << 30))
+    assert cli.main(["check", "add-zero", "--explore"]) == 0
+    assert check.last_peak(repo(), "add-zero", LEAN) == 3 << 30
+    _use(monkeypatch, PeakAdapter(5 << 30))
+    assert cli.main(["check", "add-zero"]) == 0
+    assert check.last_peak(repo(), "add-zero", LEAN) == 3 << 30          # a protected receipt counts once admitted
+    commit_all(repo_with_lean, "admit")
+    assert check.last_peak(repo(), "add-zero", LEAN) == 5 << 30
+    assert cli.main(["check", "add-zero", "--reserve", "1G"]) == 0
+    assert reserved == [None, 3 << 30, 1 << 30]
+
+
+def test_a_check_reserves_the_largest_recent_peak_else_its_checkers_largest(repo_with_lean, monkeypatch):
+    repo = lambda: Repo.open(repo_with_lean)                                       # noqa: E731
+    for peak in (5 << 30, 3 << 30):
+        _use(monkeypatch, PeakAdapter(peak))
+        assert cli.main(["check", "add-zero", "--explore"]) == 0
+    assert check.last_peak(repo(), "add-zero", LEAN) == 5 << 30     # not only the newest receipt's 3G
+    assert check.last_peak(repo(), "fresh", LEAN) == 5 << 30        # a first check: the largest of its checker
+    assert check.last_peak(repo(), "fresh", "python-eval") is None  # control: another checker's peaks do not count
+    for _ in range(jobs.RECENT):
+        assert cli.main(["check", "add-zero", "--explore"]) == 0
+    assert check.last_peak(repo(), "add-zero", LEAN) == 3 << 30     # control: an old peak drops out
+
+
+class SliceAdapter(FakeAdapter):
+    """Records the queue job its check runs in (VL_QUEUE_JOB) and whether that job's place is held."""
+    runs_in: list = []
+
+    def check(self, request):
+        from verifylab import queue
+        token = os.environ.get(queue.ENV)
+        SliceAdapter.runs_in.append((token, bool(token) and (queue.state_root() / "jobs" / f"{token}.json").is_file()))
+        return super().check(request)
+
+
+def test_a_check_runs_in_the_slice_of_its_own_queue_job(repo_with_lean, monkeypatch):
+    from verifylab import jail, queue
+    monkeypatch.delenv(queue.ENV, raising=False)
+    SliceAdapter.runs_in = []
+    _use(monkeypatch, SliceAdapter())
+    assert cli.main(["check", "add-zero", "--explore"]) == 0
+    (token, held), = SliceAdapter.runs_in
+    assert held and jail.job_slice(token) != jail.SLICE          # its capped runs go in its own slice
+    assert queue.ENV not in os.environ                           # control: nothing is left behind
+
+
+def test_a_check_that_runs_nothing_does_not_wait_for_the_queue(repo_with_lean, monkeypatch, capsys):
+    from verifylab import queue
+    write_machine(queue={"slots": 1})
+    _use(monkeypatch, FakeAdapter())
+    git(repo_with_lean, "checkout", "-q", "-b", "lane/y")
+    new = repo_with_lean / "research" / "items" / "fresh.md"
+    new.write_text((repo_with_lean / "research" / "items" / "add-zero.md").read_text().replace('"add-zero"', '"fresh"'))
+    with queue.admit("another job"):
+        assert cli.main(["check", "fresh", "--max-wait", "0.2"]) == check.EXIT_TOOL
+        assert "not on the trusted ref" in capsys.readouterr().out
+        assert cli.main(["check", "add-zero", "--max-wait", "0.2"]) == 2     # control: a check that would run waits
+    assert FakeAdapter.seen == []
+
+
+def test_a_peak_that_is_not_a_positive_whole_number_is_not_reserved(repo_with_lean, monkeypatch):
+    for planted in (float("nan"), -(5 << 30), 0.5):
+        _use(monkeypatch, PeakAdapter(planted))
+        assert cli.main(["check", "add-zero", "--explore"]) == 0
+        assert check.last_peak(Repo.open(repo_with_lean), "add-zero", LEAN) is None
+    _use(monkeypatch, PeakAdapter(3 << 30))                       # control: a recorded peak is reserved
+    assert cli.main(["check", "add-zero", "--explore"]) == 0
+    assert check.last_peak(Repo.open(repo_with_lean), "add-zero", LEAN) == 3 << 30
+
+
+# Selftest (`vl check --selftest`) ---------------------------------------------------------------------------------
+
+
+class SelftestFakeAdapter(FakeAdapter):
+    """Inspects the generated SelftestDefs/SelftestSol files and returns realistic Comparator outcomes."""
+
+    def __init__(self, overrides: dict[str, tuple[str, list[str]]] | None = None):
+        super().__init__()
+        self.overrides = overrides or {}
+        self.runs: list[tuple[str, str]] = []
+
+    def check(self, request):
+        root = request.repo.root
+        sol = (root / "Fixture" / "SelftestSol.lean").read_text(encoding="utf-8")
+        defs = (root / "Fixture" / "SelftestDefs.lean").read_text(encoding="utf-8")
+        if "def selftestOk (_ : Nat) : Prop := True" in defs:
+            case, outcome = "altered-definition", (
+                "fail", ["declaration 'selftestOk', used by the target statement, differs between the trusted definitions and the candidate's"])
+        elif "by sorry" in sol:
+            case, outcome = "sorry", ("fail", ["the solution contains `sorry` (axiom 'sorryAx'), which is not a permitted axiom"])
+        elif "axiom selftestCheat" in sol:
+            case, outcome = "extra-axiom", ("fail", ["the solution uses axiom 'selftestCheat', which is not in permitted_axioms"])
+        elif "theorem selftest_claim : True" in sol:
+            case, outcome = "weakened-target", ("fail", ["the solution's statement of 'selftest_claim' differs from the target's"])
+        else:
+            case, outcome = "control", ("pass", ["Comparator accepted the solution: 1 theorem(s)"])
+        self.runs.append((case, request.assurance))
+        verdict, reasons = self.overrides.get(case, outcome)
+        files = {"Fixture/SelftestSol.lean": sha256_hex(sol.encode())}
+        return CheckOutcome(verdict, reasons, files, {}, {"path": "research/targets/selftest.lean"},
+                            {}, {"theorems": ["selftest_claim"]}, ["fake"], "log")
+
+
+def test_selftest_passes_on_real_config_and_writes_no_receipts(repo_with_lean, monkeypatch, capsys):
+    cfg = repo_with_lean / "research" / "vl.toml"
+    # Worktree edits to research/vl.toml are ignored: selftest reads the trusted commit.
+    cfg.write_text('[project]\nname = "Fixture"\n')
+    adapter = SelftestFakeAdapter()
+    _use(monkeypatch, adapter)
+    evidence_before = sorted((repo_with_lean / "research" / "evidence").rglob("*"))
+    assert cli.main(["check", "--selftest", "--json"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["ok"] is True
+    assert [c["case"] for c in out["cases"]] == ["control", "sorry", "extra-axiom", "weakened-target", "altered-definition"]
+    assert all(c["ok"] for c in out["cases"])
+    assert all(assurance == "protected" for _, assurance in adapter.runs)
+    assert sorted((repo_with_lean / "research" / "evidence").rglob("*")) == evidence_before
+
+
+def test_selftest_exit_codes_for_slipped_plant_wrong_reason_and_tool_error(repo_with_lean, monkeypatch, capsys):
+    _use(monkeypatch, SelftestFakeAdapter({"sorry": ("pass", ["slipped through"])}))
+    assert cli.main(["check", "--selftest", "--json"]) == check.EXIT_FAIL
+    assert json.loads(capsys.readouterr().out)["ok"] is False
+
+    _use(monkeypatch, SelftestFakeAdapter({"sorry": ("fail", ["unexpected syntax failure"])}))
+    assert cli.main(["check", "--selftest", "--json"]) == check.EXIT_FAIL
+    assert json.loads(capsys.readouterr().out)["ok"] is False
+
+    _use(monkeypatch, SelftestFakeAdapter({"control": ("unsupported", ["nanoda missing"])}))
+    assert cli.main(["check", "--selftest", "--json"]) == check.EXIT_TOOL
+    assert json.loads(capsys.readouterr().out)["ok"] is False
+
+
+def test_selftest_refuses_explore_and_missing_lean_roots(repo_with_lean, monkeypatch, capsys):
+    _use(monkeypatch, SelftestFakeAdapter())
+    assert cli.main(["check", "--selftest", "--explore"]) == 2
+    assert "--selftest" in capsys.readouterr().err
+    cfg = repo_with_lean / "research" / "vl.toml"
+    cfg.write_text('[project]\nname = "Fixture"\n')
+    commit_all(repo_with_lean, "drop lean table")
+    assert cli.main(["check", "--selftest"]) == 2
+    assert "roots" in capsys.readouterr().err
+
+
+@pytest.mark.lean
+def test_selftest_runs_real_lean_comparator_against_project_config(tmp_path, monkeypatch, capsys):
+    import lean_helpers
+    skip = lean_helpers.lean_unavailable()
+    if skip:
+        pytest.skip(skip)
+    for k, v in lean_helpers.tool_env().items():
+        monkeypatch.setenv(k, v)
+    root = lean_helpers.make_repo(tmp_path, lean_helpers.load_case("control-original"))
+    monkeypatch.chdir(root)
+    assert cli.main(["check", "--selftest", "--json"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["ok"] is True
+    assert {c["case"]: c["verdict"] for c in out["cases"]} == {
+        "control": "pass",
+        "sorry": "fail",
+        "extra-axiom": "fail",
+        "weakened-target": "fail",
+        "altered-definition": "fail",
+    }

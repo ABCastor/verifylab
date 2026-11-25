@@ -11,6 +11,15 @@ name = $name
 # Folder of items, targets, evidence, reviews and evaluators; this file itself always stays at research/vl.toml.
 # research_dir = "research"
 
+[context]
+# Optional readable context; `vl init --context` creates the defaults without replacing existing files.
+# Paths are repository-relative. Agents choose what to read; these files do not bind receipts.
+problem = "research/problem.md"
+map = "research/map.md"
+ideas = "research/ideas.md"
+# Markdown files or folders searched live by `vl find --scope notes`; default: research_dir.
+# notes = ["research", "notes"]
+
 [lean]
 # Lake project directory, relative to the repository root.
 project = "."
@@ -25,6 +34,13 @@ permitted_axioms = ["propext", "Quot.sound", "Classical.choice"]
 # Machine-local paths, prefer machine.toml [caches]: the built Lake directory, or its packages/ folder only.
 # cache = "/abs/path/.lake"
 # packages = "/abs/path/.lake/packages"
+# Lake packages whose code may run on a workstation (ADR 0012, proposed): by default Mathlib and what it inherits from
+# leanprover and leanprover-community (mathlib, batteries, aesop, Qq, plausible, proofwidgets, importGraph,
+# LeanSearchClient, Cli). Any other package in lake-manifest.json makes `vl check`, `vl lane new` and `vl import`
+# unsupported unless machine.toml says [sandbox] class = "disposable". A list written here replaces the default and
+# trusts each name from any owner (the default also requires leanprover or leanprover-community): write one only to
+# add a package of your own, knowing that a fork named like a listed package then passes too.
+# trusted_packages = ["mathlib", "batteries", "aesop", "Qq", "plausible", "proofwidgets", "importGraph", "LeanSearchClient", "Cli"]
 
 [tools]
 # Interpreter of python-eval checks; it must lie under /usr, /bin, /lib, /lib64, /sbin or /etc.
@@ -35,13 +51,36 @@ permitted_axioms = ["propext", "Quot.sound", "Classical.choice"]
 # Relative to the main checkout: the folder that holds, for each repository, a folder of its lanes (worktrees,
 # metadata, overlays), named after the checkout and its git common directory. Sibling repositories may share it.
 dir = "../.vl-lanes"
-# `vl lane new` refuses to open more lanes than this.
+# `vl lane new` refuses to open more lanes than this; a lane marked `vl lane done` no longer counts.
 max_parallel = 3
 
 [check]
 # Memory cap of one run, a check or a `vl lane exec` (systemd MemoryMax of its unit).
 memory_max = "16G"
-# Statement probes after a pass: heartbeats per tactic attempt, in thousands as Lean's maxHeartbeats (at least 1000).
+# Statement probes (they run beside Comparator and are recorded after a pass; ADR 0005): heartbeats per
+# tactic attempt, in thousands as Lean's maxHeartbeats (at least 1000).
 # probe_heartbeats = 5000
 # Statement probes: seconds for the whole probe run (at least 10); a probe that runs out records null, never a verdict.
 # probe_timeout = 300
+
+# Optional contextual appraisal rubric. These commented examples leave the default
+# novelty/usefulness rubric in effect. Uncomment [appraisal] to set a rubric version
+# or define criteria; custom criteria replace the defaults.
+# [appraisal]
+# version = 1
+#
+# [appraisal.criteria.novelty]
+# question = "How novel is this subject relative to the supplied sources?"
+# labels = ["low", "medium", "high"]
+# ordered = true
+# description = "Compare the subject with the supplied literature."
+# version = "novelty-rubric-1"
+# evidence = "Name the closest precedent and the difference."
+#
+# [appraisal.criteria.usefulness]
+# question = "How useful is this subject for the named goal?"
+# labels = ["low", "medium", "high"]
+# ordered = true
+#
+# Custom criteria also require question and distinct labels. Optional fields are
+# ordered (default true), description, version, and evidence.

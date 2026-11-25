@@ -34,8 +34,16 @@ LEAN_SKIP = lean_unavailable()
 # `prelude` solutions lack the builtin String.mk), and quot_mismatch because its own `prelude` challenge lacks Nat:
 # vl reads those as `error`, never as a pass.
 THROUGH_ADAPTER = {
-    "olean_issue": ("fail", "the Lean default kernel rejected the solution: while replaying declaration 'boom'"),
+    "auto_param_match": ("pass", "Comparator accepted the solution"),
+    "auto_param_mismatch": ("fail", "differs from the target's"),
+    # Under T0 (protected Lean checks require nanoda), Comparator runs nanoda before Lean's default kernel and reports
+    # nanoda's rejection of the malformed export first; Lean's default kernel also rejects it in outcome.log.
+    "olean_issue": ("error", "nanoda exited with 101"),
     "opaque_value": ("fail", "the solution uses axiom 'f'"),
+    "opt_param_match": ("pass", "Comparator accepted the solution"),
+    "opt_param_mismatch": ("fail", "differs from the target's"),
+    "out_param_match": ("pass", "Comparator accepted the solution"),
+    "out_param_mismatch": ("fail", "differs from the target's"),
     "simple_axiom_issue": ("fail", "the solution uses axiom 'helper'"),
     "simple_kind_mismatch": ("fail", "the solution uses axiom 'helper'"),   # same files as simple_axiom_issue
     "simple_match": ("pass", "Comparator accepted the solution"),
@@ -88,7 +96,7 @@ def vl_kernels(config: dict, nanoda: Path) -> dict[str, list[str]]:
 
 def test_every_vendored_project_is_run_exactly_once():
     projects = sorted(p.name for p in KNOWN.iterdir() if p.is_dir())
-    assert len(projects) == 20 and sorted([*THROUGH_ADAPTER, *THROUGH_RUNNER]) == projects
+    assert len(projects) == 26 and sorted([*THROUGH_ADAPTER, *THROUGH_RUNNER]) == projects
     assert not set(THROUGH_ADAPTER) & set(THROUGH_RUNNER)
     for name in projects:
         assert ((THROUGH_ADAPTER | THROUGH_RUNNER)[name][0] == "pass") == (expected_exit(name) == 0), name
@@ -126,16 +134,23 @@ def _adapter_repo(tmp_path: Path, name: str, nanoda: bool) -> tuple[Path, str]:
 @pytest.mark.lean
 @pytest.mark.parametrize("name", sorted(THROUGH_ADAPTER))
 def test_known_answer_through_the_adapter(tmp_path, lean_env, name):
-    config = config_of(name)
-    nanoda = bool(vl_kernels(config, Path("nanoda_bin")))
-    if nanoda and "COMPARATOR_NANODA" not in tool_env():
-        pytest.skip("nanoda not available")
-    root, item_id = _adapter_repo(tmp_path, name, nanoda)
+    # T0 requires an external kernel (nanoda) for every newly issued protected Lean check, even when Comparator's
+    # upstream config.json sets enable_nanoda = false; lean_env already requires nanoda to be present.
+    assert "COMPARATOR_NANODA" in tool_env()
+    root, item_id = _adapter_repo(tmp_path, name, True)
     outcome = LeanComparatorAdapter().check(request(root, item_id))
     verdict, fragment = THROUGH_ADAPTER[name]
     assert f"--- exit {expected_exit(name)} ---" in outcome.log, explain(outcome)
     assert outcome.verdict == verdict and fragment in " ".join(outcome.reasons), explain(outcome)
-    assert outcome.checked["kernels"] == ["lean", *([NANODA_KERNEL] if nanoda else [])]
+    if name == "olean_issue":
+        assert "Lean default kernel rejects the solution" in outcome.log
+    if name == "opt_param_mismatch":
+        assert not outcome.checked.get("kernel_results")
+        assert "Running Lean default kernel on solution" not in outcome.log
+    if name == "opt_param_match":
+        assert "Lean default kernel accepts the solution" in outcome.log
+        assert "nanoda kernel accepts the solution" in outcome.log
+    assert outcome.checked["kernels"] == ["lean", NANODA_KERNEL]
     assert outcome.environment["isolation"]["kind"] == "bwrap+landrun"
 
 
@@ -163,7 +178,7 @@ def test_known_answer_through_the_adapter_runner(tmp_path, lean_env, name):
     run = run_comparator(box, used["comparator"], project, config, work / "comparator.json",
                          timeout=900, memory_max="12G", memory_total=None)
     result = classify(run.stdout, run.stderr, run.returncode, tuple(config["theorem_names"]),
-                      ("lean", *sorted(kernels)), config["challenge_module"], config["solution_module"])
+                      ("lean", *sorted(kernels)), config["challenge_module"], config["solution_module"], run.service)
     verdict, fragment = THROUGH_RUNNER[name]
     detail = f"{result}\n--- stdout\n{run.stdout[-2000:]}\n--- stderr\n{run.stderr[-2000:]}"
     assert run.returncode == expected_exit(name), detail

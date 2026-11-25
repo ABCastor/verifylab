@@ -40,10 +40,10 @@ shared cache.
 
 ## 6. A lane belongs to the repository that made it
 A lane records git's common directory (`repository`) when it is made and lives in a folder of `[lanes] dir` named
-after the main checkout and a digest of that directory; `list`, `exec` and `close` refuse a lane that names another
-repository, and a lane folder that git does not list among the repository's worktrees. A lane of earlier versions
-(metadata directly in `[lanes] dir`, no `repository`) counts as the repository's only while git lists its path
-there, so it still closes from its own repository and from no other. Why: sibling repositories keep the default
+after the main checkout and a digest of that directory; `list`, `exec`, `done` and `close` refuse a lane that names
+another repository, and a lane folder that git does not list among the repository's worktrees. A lane of earlier
+versions (metadata directly in `[lanes] dir`, no `repository`) counts as the repository's only while git lists its
+path there, so it still closes from its own repository and from no other. Why: sibling repositories keep the default
 `../.vl-lanes`, and keyed by name alone one repository listed, ran commands in and could close another's lane, and
 shared its lane names, count and lock.
 
@@ -51,3 +51,10 @@ shared its lane names, count and lock.
 The command's output and exit code reach the caller unchanged, and `--json` is refused for `exec`, before or after
 the action alike. Why: an envelope would have to capture the output of builds that run for an hour, and it would put
 a child's output, JSON or not, inside vl's own JSON; passing it through is simpler and never mixes the two.
+
+## 8. A finished lane frees its slot before it is integrated (2026-10-10)
+`vl lane done NAME` records `done` (a time) in the lane's metadata, under the lanes lock and while no command runs in
+the lane: the lane stops counting toward `[lanes] max_parallel`, `vl lane exec` refuses it, and its worktree, branch
+and overlay stay until `vl lane close`. `--undo` counts it again only while a slot is free; marking twice changes
+nothing. `vl lane list` shows each lane as open or done (JSON `done`: the time, or null). A finished lane can release capacity as soon as its worker has stopped. A done lane that kept
+running commands would put more than `max_parallel` lanes to work at once.

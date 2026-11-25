@@ -9,9 +9,9 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator
 
 from . import gitref
-from .config import (CHECK_INPUT, CONFIG_INPUTS, CONFIG_PATH, Config, ConfigError, config_digest, load_config,
-                     load_worktree_config, parse_config)
-from .records import (Item, RecordError, canonical_json, parse_item, question_digest, receipt_problems,
+from .config import (CHECK_INPUT, CONFIG_INPUTS, CONFIG_PATH, Config, ConfigError, LeanConfig, config_digest,
+                     load_config, load_worktree_config, parse_config)
+from .records import (MEANING_KINDS, Item, RecordError, canonical_json, parse_item, question_digest, receipt_problems,
                       review_problems, sha256_hex)
 
 ITEMS = "items"
@@ -21,6 +21,7 @@ REVIEWS = "reviews"
 EVALUATORS = "evaluators"
 CACHE_DIR = ".vl-cache"              # machine-local cache: never versioned
 EXPLORE_DIR = f"{CACHE_DIR}/explore"   # exploratory receipts: never versioned, never admitted, never protected
+FOREIGN_DIR = f"{CACHE_DIR}/foreign"   # receipts imported as foreign (ADR 0015, proposed): shown, never counted
 
 
 def input_file(rel_path: str) -> str:
@@ -55,12 +56,26 @@ class StoredRecord:
     admitted: bool
 
 
+def question_from_revision(root: Path, item_path: str, revision: Any) -> tuple[str | None, str | None]:
+    """(question_digest, error reason) reconstructed from a historical receipt's `item_revision` blob in `root`."""
+    _, data = gitref.blob(root, revision) if isinstance(revision, str) and revision else (None, None)
+    if data is None:
+        return None, (f"{item_path}#question (the receipt names no question digest and its item revision "
+                      f"{str(revision)[:12]} is not in the git object store)")
+    try:
+        return question_digest(parse_item(data, item_path)), None
+    except RecordError:
+        return None, f"{item_path}#question (item revision {str(revision)[:12]} of the receipt does not parse)"
+
+
 class Repo:
     def __init__(self, config: Config):
         self.config = config          # read from the trusted ref (see config.load_config)
         self.root = config.root
         self.trusted_commit = config.trusted_commit   # the trusted ref, resolved once for this command
         self._trusted_items: tuple[dict[str, Item], list[str]] | None = None
+        self.meanings: dict[tuple[str, str], Any] = {}     # status.meaning by item (path, revision): one per command
+        self.trusted_digests: dict[str, str | None] = {}   # trusted_digest by input path: one per command
 
     @classmethod
     def open(cls, start: Path | None = None, trusted_ref: str | None = None) -> "Repo":
@@ -85,6 +100,16 @@ class Repo:
 
     def trusted_paths(self, folder: str) -> list[str]:
         return gitref.ls_files(self.root, self.trusted_commit, folder) if self.trusted_commit else []
+
+    def lean_config_at(self, commit: str) -> LeanConfig:
+        """The [lean] table of research/vl.toml as committed at `commit`; ConfigError when it is not there or invalid."""
+        data = gitref.show(self.root, commit, CONFIG_PATH)
+        if data is None:
+            raise ConfigError(f"{CONFIG_PATH} is not in commit {commit[:12]}")
+        try:
+            return parse_config(self.root, data.decode("utf-8")).lean
+        except UnicodeDecodeError as exc:
+            raise ConfigError(f"{CONFIG_PATH} in commit {commit[:12]} is not UTF-8") from exc
 
     # Items -----------------------------------------------------------------
 
@@ -176,6 +201,17 @@ class Repo:
         return [*self._records(EVIDENCE, item_id, receipt_problems),
                 *self._records(EVIDENCE, item_id, receipt_problems, explore=True)]
 
+    def foreign_receipts(self, item_id: str) -> list[StoredRecord]:
+        """Receipts of other machines imported as foreign, `.vl-cache/foreign/<machine>/<item>/<name>.json`: shown on the
+        card and never counted (status reads `receipts`, which does not list them) until a matching `vl replay` replaces them with its own receipt."""
+        found = []
+        for folder in sorted((self.root / FOREIGN_DIR).glob(f"*/{item_id}")):
+            for file in sorted(folder.glob("*.json")):
+                rel = str(file.relative_to(self.root))
+                found.append(StoredRecord(rel, {}, ("not a regular file",), False) if not file.is_file() or file.is_symlink()
+                             else self._record(rel, file.read_bytes(), item_id, receipt_problems, False, False))
+        return found
+
     def explore_path(self, item_id: str, name: str) -> Path:
         return self.root / EXPLORE_DIR / item_id / name
 
@@ -187,13 +223,13 @@ class Repo:
         return records
 
     def review_revision_problems(self, record: StoredRecord) -> list[str]:
-        """Reject a fidelity record that attributes bound item text to a different item revision.
+        """Reject a fidelity or correspondence record that attributes bound item text to a different item revision.
 
         Earlier vl versions could record an old requested revision but bind the current trusted meaning.
         A missing blob cannot establish a mismatch; target-only legacy reviews retain their existing policy.
         """
         review = record.data
-        if review.get("kind") != "fidelity" or not isinstance(review.get("meaning"), dict):
+        if review.get("kind") not in MEANING_KINDS or not isinstance(review.get("meaning"), dict):
             return []
         _, raw = gitref.blob(self.root, review["item_revision"])
         if raw is None:
@@ -202,7 +238,7 @@ class Repo:
         try:
             item = parse_item(raw, path)
         except RecordError as exc:
-            return [f"fidelity item_revision is not a revision of the reviewed item: {exc}"]
+            return [f"{review['kind']} item_revision is not a revision of the reviewed item: {exc}"]
         basis = review["meaning"]
         expected = {"statement_sha256": sha256_hex((item.statement or "").encode())}
         for name in ("limits", "assumptions"):
@@ -214,7 +250,7 @@ class Repo:
         target = item.lean.get("target") or item.python.get("evaluator")
         if target != review.get("target_path"):
             mismatches.append("target_path")
-        return (["fidelity meaning disagrees with item_revision: " + ", ".join(mismatches)
+        return ([f"{review['kind']} meaning disagrees with item_revision: " + ", ".join(mismatches)
                  + "; read the admitted meaning and record a new review"] if mismatches else [])
 
     def record_folders(self, folder: str) -> list[str]:
@@ -262,6 +298,9 @@ class Repo:
             elif self.question_stale(receipt, trusted):
                 stale.append(f"{item.path}#question (as checked, it is not the item on the trusted ref: a fresh "
                              "clone would ask or answer otherwise)")
+        if inputs.get("imports"):
+            from . import imports as vl_imports
+            stale.extend(vl_imports.stale_imports(self, receipt, item, admitted=admitted))
         return sorted(stale)
 
     def question_stale(self, receipt: dict[str, Any], item: Item) -> str | None:
@@ -271,15 +310,9 @@ class Repo:
         recorded = receipt.get("question_digest")
         where = f"{item.path}#question"
         if not isinstance(recorded, str):
-            revision = receipt.get("item_revision")
-            full, data = gitref.blob(self.root, revision) if isinstance(revision, str) and revision else (None, None)
-            if data is None:
-                return (f"{where} (the receipt names no question digest and its item revision "
-                        f"{str(revision)[:12]} is not in the git object store)")
-            try:
-                recorded = question_digest(parse_item(data, item.path))
-            except RecordError:
-                return f"{where} (item revision {str(revision)[:12]} of the receipt does not parse)"
+            recorded, err = question_from_revision(self.root, item.path, receipt.get("item_revision"))
+            if err is not None:
+                return err
         return where if recorded != question_digest(item) else None
 
     def _roots(self, ref: str | None) -> tuple[str, ...] | None:
@@ -301,9 +334,12 @@ class Repo:
         return then is not None and then == self._roots(self.trusted_commit)
 
     def trusted_digest(self, rel_path: str) -> str | None:
-        """Digest of a recorded input as committed on the trusted ref, or None when it is not there."""
-        content = self.read_trusted(input_file(rel_path))
-        return self.digest(rel_path, content) if content is not None else None
+        """Digest of a recorded input as committed on the trusted ref, or None when it is not there (read once per
+        command: receipts share most of their inputs, and the trusted commit does not move)."""
+        if rel_path not in self.trusted_digests:
+            content = self.read_trusted(input_file(rel_path))
+            self.trusted_digests[rel_path] = self.digest(rel_path, content) if content is not None else None
+        return self.trusted_digests[rel_path]
 
     def input_digest(self, rel_path: str, ref: str) -> str | None:
         """Digest of a recorded input as committed on `ref`, or None when it is not there."""
@@ -319,3 +355,22 @@ class Repo:
             return config_digest(rel_path, parse_config(self.root, content.decode("utf-8")))
         except (ConfigError, UnicodeDecodeError):
             return None
+
+
+class TrustedRepo(Repo):
+    """The repository as a fresh clone of the trusted commit would show it: only admitted receipts and reviews count
+    and a candidate input is compared with the trusted ref, never with this worktree, so nothing the worktree holds
+    or lacks changes what is derived (the exploratory store is not read). For `vl export catalog`."""
+
+    def receipts(self, item_id: str) -> list[StoredRecord]:
+        return [r for r in self._records(EVIDENCE, item_id, receipt_problems) if r.admitted]
+
+    def foreign_receipts(self, item_id: str) -> list[StoredRecord]:
+        return []
+
+    def reviews(self, item_id: str) -> list[StoredRecord]:
+        return [r for r in super().reviews(item_id) if r.admitted]
+
+    def worktree_digest(self, rel_path: str) -> str | None:
+        return self.trusted_digest(rel_path)
+

@@ -1,0 +1,24 @@
+#!/bin/sh
+# Worker-side part of a patch trial. Run inside a provisioned, disposable worker for foreign code.
+set -eu
+cd "$1"
+shift
+if test "${VL_TRIAL_EXACT_MODULES:-}" = 1; then
+    for module do
+        shift
+        set -- "$@" "+$module"
+    done
+fi
+lake --version || exit 125
+rc=0
+lake build "$@" || rc=$?
+if test -r /sys/fs/cgroup/memory.peak; then
+    printf 'worker cgroup memory.peak: '
+    cat /sys/fs/cgroup/memory.peak
+fi
+if test "$rc" -ge 128 || test "$rc" = 126 || test "$rc" = 127; then
+    printf 'Lake build interrupted or unavailable (exit %s)
+' "$rc" >&2
+    exit 125
+fi
+exit "$rc"

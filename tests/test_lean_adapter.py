@@ -22,7 +22,7 @@ from lean_helpers import (
 from verifylab import gitref, jail
 from verifylab.config import parse_config, rules_digest
 from verifylab.adapters.lean_comparator import (
-    GUARDS, NANODA_KERNEL, PROBE_GUARDS, VERDICT_GUARDS, LeanComparatorAdapter, classify, comparator_config, parse_spec,
+    GATE_GUARDS, GUARDS, NANODA_KERNEL, PROBE_GUARDS, VERDICT_GUARDS, LeanComparatorAdapter, classify, comparator_config, parse_spec,
     render_lakefile,
     resolve_tool, timings, toolchain_dir,
 )
@@ -154,6 +154,9 @@ def _out(after_solution: str = "") -> str:
           "has type\n  Fixture.double n = 2 * n\nerror: build failed\n"),
      "uncaught exception: Child exited with 1\n", 1, "fail", "does not compile: error: VLSolution.lean:7:55"),
     (_out("error: build failed\n"), "uncaught exception: Child exited with 137\n", 1, "error", "without a Lean diagnostic"),
+    (_out("✖ [4/5] Building Fixture\nerror: failed to execute '/tc/bin/lean': resource exhausted (error code: 12, "
+          "not enough memory)\n"), "error: build failed\nuncaught exception: Child exited with 1\n", 1, "error",
+     "without a Lean diagnostic (Child exited with 1): error: failed to execute '/tc/bin/lean': resource exhausted"),
     (_out("Exporting #[Nat, VL.DoubleEven.main] from VLSolution\n"),
      "PANIC at dumpConstant Export:237:48: Constant VL.DoubleEven.main not found in environment.\n"
      "uncaught exception: Child exited with 134\n", 1, "fail", "does not declare target theorem"),
@@ -191,6 +194,9 @@ _KERNELS = _EXPORTED + "Running nanoda kernel on solution\n"
      "Error while interacting with nanoda kernel: no such file", "error", "the nanoda kernel could not be run"),
     (_KERNELS + "nanoda kernel rejected the solution\nRunning Lean default kernel on solution.\n"
      "Lean default kernel accepts the solution\n", "nanoda exited with 1", "fail", "the nanoda kernel rejected"),
+    (_KERNELS + "nanoda kernel rejected the solution\nRunning Lean default kernel on solution.\n"
+     "Lean default kernel accepts the solution\n", "nanoda exited with 137", "error",
+     "the nanoda kernel was killed by signal 9 (nanoda exited with 137)"),
     (_EXPORTED + "Running Lean default kernel on solution.\nLean default kernel accepts the solution\n"
      "Quotient post-check rejects the solution\n", "Quotient constant mismatch on: Quot.lift", "fail",
      "kernel rejected the solution: Quotient constant mismatch on: Quot.lift"),
@@ -207,6 +213,22 @@ def test_classify_every_comparator_message(stdout, message, verdict, fragment):
     assert result.verdict == verdict and fragment in result.reason, result
     assert result.message == message
 
+
+
+def test_only_observed_kernel_outcomes_are_attributed():
+    output = _KERNELS + "nanoda kernel rejected the solution\nLean default kernel accepts the solution\n"
+    result = classify(output, "uncaught exception: nanoda exited with 1\n", 1, (), ("lean", "nanoda"))
+    assert (result.verdict, dict(result.kernel_results)) == ("fail", {"lean": "passed", "nanoda": "failed"})
+
+    both_reject = output.replace("accepts", "rejects")
+    result = classify(both_reject, "uncaught exception: nanoda exited with 1\n", 1, (), ("lean", "nanoda"))
+    assert dict(result.kernel_results) == {"lean": "failed", "nanoda": "failed"}
+
+    # A check that stops before export and a kernel terminated by a signal have no attributable verdict.
+    no_export = output[output.index("nanoda kernel rejected"):]
+    assert not classify(no_export, "", 1, (), ("lean", "nanoda")).kernel_results
+    killed = classify(output, "uncaught exception: nanoda exited with 137\n", 1, (), ("lean", "nanoda"))
+    assert killed.verdict == "error" and not killed.kernel_results
 
 def test_pass_needs_every_configured_kernel_to_report_acceptance():
     ok = _EXPORTED + ("Running nanoda kernel on solution\nnanoda kernel accepts the solution\n"
@@ -295,6 +317,23 @@ def test_bad_request_is_an_error_never_an_exception(tmp_path):
     assert outcome.verdict == "error" and "assurance" in outcome.reasons[0]
     outcome = adapter.check(request(root, "double-even", guards={"no_such_guard"}))
     assert outcome.verdict == "error" and "unknown guard" in outcome.reasons[0]
+
+
+def test_a_protected_check_without_a_systemd_user_manager_is_unsupported_before_anything_builds(tmp_path, monkeypatch):
+    """Protected Lean runs in a systemd user service; with no user manager (a bare WSL, a container, ssh without a
+    session) the check says so and stops, instead of failing inside its first build."""
+    home = tmp_path / "elan"
+    for tool in ("lake", "lean"):
+        binary = toolchain_dir(TOOLCHAIN, elan_home=home) / "bin" / tool
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        binary.touch()
+    write_machine({}, elan_home=str(home))
+    monkeypatch.setattr(jail, "available", lambda: True)
+    monkeypatch.setattr(jail, "service_problem", lambda: "no systemd user manager: Failed to connect to bus")
+    root = make_repo(tmp_path)
+    outcome = LeanComparatorAdapter().check(request(root, "double-even"))
+    assert outcome.verdict == "unsupported", explain(outcome)
+    assert "systemd user service" in outcome.reasons[0] and "Failed to connect to bus" in outcome.reasons[0]
 
 
 @pytest.mark.lean
@@ -412,7 +451,7 @@ def test_receipt_records_what_was_checked_and_with_which_tools(lean_env, shared_
     assert outcome.checked["definitions_source"] == "trusted-commit"
     assert outcome.checked["comparator"]["result"] == "accepted"
     env = outcome.environment
-    assert env["toolchain"] == TOOLCHAIN and "Lean (version 4.34.0-rc2" in env["lean_version"]
+    assert env["toolchain"] == TOOLCHAIN and f"Lean (version {TOOLCHAIN.rpartition(':v')[2]}" in env["lean_version"]
     for name in ("comparator", "landrun", "lean4export"):
         assert len(env["tools"][name]["sha256"]) == 64
         assert env["tools"][name]["source"] == f"machine.toml [tools] {name}"
@@ -438,7 +477,9 @@ def test_receipt_records_isolation_and_where_the_time_went(lean_env, shared_case
     assert list(phases)[:5] == ["prepare", "isolation_probe", "prebuild_challenge", "comparator_start", "build_challenge"]
     assert {"export_challenge", "build_solution", "export_solution_and_compare", "kernel_lean"} <= set(phases)
     assert phases["export_challenge"] > 0 and phases["export_solution_and_compare"] > 0   # 0.0 when block-buffered
-    assert sum(phases.values()) <= outcome.extra["seconds"] + 0.1
+    # The statement probes run beside Comparator (and the preflight beside the challenge build): the others add up.
+    assert sum(v for k, v in phases.items() if k not in ("preflight", "probes")) <= outcome.extra["seconds"] + 0.1
+    assert 0 < phases["probes"] <= outcome.extra["seconds"]
     assert any(m["module"] == "VLChallenge" and m["side"] == "challenge" for m in outcome.extra["modules"])
     assert outcome.extra["jobs"]["build_challenge"] >= 2 and outcome.extra["memory_peak_bytes"] > 50 * 2**20
 
@@ -457,7 +498,7 @@ PROBE_CASES = [n for n in LEAN_CASES if load_case(n).guard in PROBE_GUARDS]
 
 def test_every_guard_has_a_planted_defect():
     assert set(GUARD_DEFECTS) == VERDICT_GUARDS
-    assert {load_case(n).guard for n in PROBE_CASES} == PROBE_GUARDS == GUARDS - VERDICT_GUARDS
+    assert {load_case(n).guard for n in PROBE_CASES} == PROBE_GUARDS == GUARDS - VERDICT_GUARDS - GATE_GUARDS
 
 
 @pytest.mark.lean
@@ -547,7 +588,7 @@ def _depend_on(tmp_path: Path, packages: Path, rev: str) -> Path:
                               "inherited": False, "configFile": "lakefile.toml"}]}
     (root / "lake-manifest.json").write_text(json.dumps(manifest, indent=1))
     vl = root / "research/vl.toml"
-    vl.write_text(vl.read_text() + f'packages = "{packages}"\n')
+    vl.write_text(vl.read_text() + f'packages = "{packages}"\ntrusted_packages = ["dep"]\n')   # not the gate's subject
     target = root / "research/targets/double-value.lean"
     target.write_text("import Fixture.Defs\nimport Dep\n\nnamespace VL.DoubleValue\n\n"
                       "theorem main : Fixture.double 21 = 42 := sorry\n\nend VL.DoubleValue\n")
@@ -610,7 +651,7 @@ def test_mathlib_smoke_reuses_built_packages_read_only(tmp_path, lean_env):
         "theorem range_card (n : ℕ) : (Finset.range n).card = n := Finset.card_range n\n\nend Small\n")
     (root / "research" / "vl.toml").write_text(
         '[project]\nname = "smoke"\n\n[lean]\nroots = ["Small"]\n'
-        f'packages = "{MATHLIB_PACKAGES}"\n')
+        f'packages = "{MATHLIB_PACKAGES}"\n')      # the real Mathlib manifest passes the default gate: the control
     (root / "research" / "targets" / "range-card.lean").write_text(
         "import Mathlib.Data.Finset.Card\n\nnamespace VL.RangeCard\n\n"
         "theorem main (n : ℕ) : (Finset.range n).card = n := sorry\n\nend VL.RangeCard\n")
@@ -840,3 +881,89 @@ def test_the_receipt_records_what_the_shared_build_cache_held(tmp_path):
                                                 "sha256": sha256_hex(trace.read_bytes())}}
     moved = dependency_identity(tmp_path / "packages", [{"name": "dep", "rev": "0" * 40}], [])
     assert moved["revisions"]["dep"]["matches"] is False
+
+
+def test_t0_protected_check_refuses_external_kernels_false(tmp_path, monkeypatch):
+    """T0: Newly issued protected Lean checks cannot opt out via [lean] external_kernels = false, whereas
+    replay --contract recheck (require_external_kernels=True) enforces nanoda instead of refusing."""
+    from verifylab import jail, machine
+    from verifylab.adapters import lean_comparator as lc
+    from verifylab.adapters.base import CheckRequest
+    from verifylab.repo import Repo
+    from conftest import commit_all
+
+    root = tmp_path / "repo"
+    (root / "research" / "items").mkdir(parents=True)
+    (root / "research" / "targets").mkdir(parents=True)
+    (root / "Fixture").mkdir()
+    (root / "research" / "vl.toml").write_text(
+        '[project]\nname = "t"\n[lean]\nproject = "."\nroots = ["Fixture"]\n'
+        'external_kernels = false\npermitted_axioms = ["propext", "Quot.sound", "Classical.choice"]\n'
+    )
+    (root / "lean-toolchain").write_text("leanprover/lean4:v4.34.0-rc2\n")
+    (root / "lakefile.toml").write_text('name = "t"\n')
+    (root / "Fixture" / "Basic.lean").write_text("theorem x : 1 = 1 := rfl\n")
+    (root / "research" / "targets" / "t.lean").write_text("import Fixture.Basic\ntheorem VL.t : 1 = 1 := sorry\n")
+    (root / "research" / "items" / "item-t.md").write_text(
+        '+++\nid = "item-t"\nkind = "result"\ntitle = "T"\nauthor = "human:a"\ncreated = 2026-10-01\n'
+        'statement = "x"\nclaim = "formal"\n[lean]\ntarget = "research/targets/t.lean"\n'
+        'theorems = ["VL.t"]\nimports = ["Fixture.Basic"]\nproofs = {"VL.t" = "rfl"}\n+++\n'
+    )
+    git(root, "init", "-q", "-b", "trusted")
+    git(root, "config", "vl.trustedRef", "trusted")
+    commit_all(root, "init")
+
+    tc = tmp_path / "tc"
+    (tc / "bin").mkdir(parents=True)
+    for exe in ("lean", "lake"):
+        p = tc / "bin" / exe
+        p.write_text("#!/bin/sh\nexit 0\n")
+        p.chmod(0o755)
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    pins = {}
+    for name in ("comparator", "landrun", "lean4export"):
+        t = tools / name
+        t.write_text("#!/bin/sh\nexit 0\n")
+        t.chmod(0o755)
+        pins[name] = sha256_hex(t.read_bytes())
+    machine.write_revisions(tools, pins)
+    write_machine({k: str(tools / k) for k in pins}, elan_home=str(tmp_path / "elan"))
+
+    monkeypatch.setattr(lc, "toolchain_dir", lambda spec, elan_home=None: tc)
+    monkeypatch.setattr(jail, "available", lambda: True)
+    monkeypatch.setattr(jail, "service_problem", lambda: None)
+
+    repo = Repo.open(root)
+    trusted = gitref.rev_parse(root, "trusted")
+    item = repo.load_item("item-t")
+    outcome = LeanComparatorAdapter().check(CheckRequest(
+        repo=repo, item=item, assurance="protected", trusted_commit=trusted,
+        scratch=tmp_path / "scratch1", timeout=60, memory_max=None,
+    ))
+    assert outcome.verdict == "unsupported"
+    assert "[lean] external_kernels = false is not permitted" in outcome.reasons[0]
+
+    # Clean control (with require_external_kernels=True, used by replay --contract recheck): bypasses the opt-out
+    # refusal and instead insists that nanoda itself be installed on the machine.
+    recheck = LeanComparatorAdapter().check(CheckRequest(
+        repo=repo, item=item, assurance="protected", trusted_commit=trusted,
+        scratch=tmp_path / "scratch2", timeout=60, memory_max=None, require_external_kernels=True,
+    ))
+    assert recheck.verdict == "unsupported"
+    assert "nanoda" in recheck.reasons[0] and "not installed on this machine" in recheck.reasons[0]
+
+
+@pytest.mark.lean
+def test_t0_protected_lean_check_refuses_external_kernels_false_even_with_real_tools(tmp_path, lean_env, pinned_tools):
+    """T0 on real Lean toolchain & pinned tools: [lean] external_kernels = false cannot mint a single-kernel pass."""
+    root = make_repo(tmp_path, load_case("control-original"))
+    git(root, "checkout", "-q", "trusted")
+    cfg = root / "research" / "vl.toml"
+    cfg.write_text(cfg.read_text().replace("external_kernels = true", "external_kernels = false"))
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "-m", "external_kernels false")
+    git(root, "checkout", "-q", "-B", "candidate")
+    outcome = LeanComparatorAdapter().check(request(root, "double-even"))
+    assert outcome.verdict == "unsupported", explain(outcome)
+    assert "external_kernels = false is not permitted" in outcome.reasons[0]

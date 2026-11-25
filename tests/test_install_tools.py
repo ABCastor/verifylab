@@ -86,8 +86,8 @@ elif name == "cargo":
     env = {**os.environ, "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
            "INSTALL_TEST_LOG": str(log)}
 
-    def run():
-        return subprocess.run([str(SCRIPT), "--offline", str(build)], env=env,
+    def run(*options):
+        return subprocess.run([str(SCRIPT), "--offline", *options, str(build)], env=env,
                               capture_output=True, text=True, timeout=20)
 
     return build, env, log, run
@@ -154,3 +154,29 @@ def test_clean_pinned_sources_reach_build_and_offline_tool_admission(installer):
     assert all((build / "bin" / name).is_file() for name in PINS)
     provenance = (build / "SOURCE-REVISIONS").read_text()
     assert all(revision in provenance for revision in PINS.values())
+
+
+def test_a_second_reviewed_toolchain_builds_with_its_own_provenance(installer):
+    build, _, log, run = installer
+    result = run("--toolchain", "leanprover/lean4:v4.34.1")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "init --tools --toolchain leanprover/lean4:v4.34.1 " in log.read_text()
+    provenance = (build / "SOURCE-REVISIONS").read_text()
+    assert provenance.startswith("Lean toolchain: leanprover/lean4:v4.34.1\n")
+    assert all(revision in provenance for revision in PINS.values())
+
+
+def test_a_toolchain_without_reviewed_pins_is_refused_before_any_build(installer):
+    build, _, log, run = installer
+    result = run("--toolchain", "leanprover/lean4:v4.35.0")
+    assert result.returncode == 2 and "no reviewed source pins" in result.stderr
+    assert not log.exists() and not (build / "bin").exists()
+    # The control: the same sources under a reviewed toolchain build.
+    assert run("--toolchain", "leanprover/lean4:v4.34.0-rc2").returncode == 0
+
+
+@pytest.mark.parametrize("options", [("--toolchain",), ("--bogus",)])
+def test_malformed_options_print_usage(installer, options):
+    _, _, log, run = installer
+    result = run(*options)
+    assert result.returncode == 2 and "usage:" in result.stderr and not log.exists()

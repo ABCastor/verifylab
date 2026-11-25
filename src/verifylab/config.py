@@ -31,6 +31,7 @@ RULES_INPUT = f"{CONFIG_PATH}#verdict-rules"
 VERDICT_INPUT = f"{CONFIG_PATH}#verdict"
 CHECK_INPUT = f"{CONFIG_PATH}#check"
 CONFIG_INPUTS = (RULES_INPUT, VERDICT_INPUT, CHECK_INPUT)
+PROTECTED_EXTERNAL_KERNELS = ("nanoda",)
 TRUSTED_REF_KEY = "vl.trustedRef"     # repository-local git config, never a committed file
 DEFAULT_TRUSTED_REF = "main"
 DEFAULT_AXIOMS = ("propext", "Quot.sound", "Classical.choice")
@@ -54,6 +55,9 @@ class LeanConfig:
     # Lets a research checkout work without its own multi-GB build cache.
     cache: str | None = None
     packages: str | None = None
+    # Lake packages whose code may run on a workstation (packages.py, ADR 0012, proposed); None: the default, Mathlib
+    # and the packages it inherits from the Lean organisations. Not a verdict input: it only decides where a check may run.
+    trusted_packages: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -89,7 +93,12 @@ def find_root(start: Path) -> Path:
     for candidate in [start, *start.parents]:
         if (candidate / DEFAULT_RESEARCH_DIR / CONFIG_NAME).is_file():
             return candidate
-    raise ConfigError(f"no {DEFAULT_RESEARCH_DIR}/{CONFIG_NAME} above {start}; run `vl init` first")
+    if any((parent / name).is_file() for parent in (start, *start.parents)
+           for name in ("lakefile.toml", "lakefile.lean")):
+        raise ConfigError(f"no {CONFIG_PATH} above {start}. For a native Lake checkout, use its Lean and Comparator "
+                          "workflow (see the verifylab skill's Check route). Run `vl init` only to adopt "
+                          "VerifyLab project records")
+    raise ConfigError(f"no {CONFIG_PATH} above {start}; run `vl init` to create a VerifyLab project")
 
 
 def _strs(value: Any, key: str) -> tuple[str, ...]:
@@ -147,6 +156,8 @@ def parse_config(root: Path, text: str, trusted_ref: str = DEFAULT_TRUSTED_REF) 
         external_kernels=_flag(lean_raw, "external_kernels", True, "[lean]"),
         cache=_text(lean_raw, "cache", None, "[lean]"),
         packages=_text(lean_raw, "packages", None, "[lean]"),
+        trusted_packages=_strs(lean_raw["trusted_packages"], "[lean] trusted_packages")
+        if "trusted_packages" in lean_raw else None,
     )
     tools = _table(raw, "tools")
     if not all(isinstance(v, str) for v in tools.values()):
@@ -171,9 +182,10 @@ def parse_config(root: Path, text: str, trusted_ref: str = DEFAULT_TRUSTED_REF) 
     )
 
 
-def _rules(config: Config) -> dict[str, Any]:
+def _rules(config: Config, *, external_minimum: bool = True) -> dict[str, Any]:
     lean = config.lean
-    return {"permitted_axioms": sorted(set(lean.permitted_axioms)), "external_kernels": lean.external_kernels,
+    return {"permitted_axioms": sorted(set(lean.permitted_axioms)),
+            "external_kernels": True if external_minimum else lean.external_kernels,
             "project": posixpath.normpath(lean.project.strip() or "."), "roots": sorted(set(lean.roots))}
 
 
@@ -182,24 +194,34 @@ def _digest(basis: dict[str, Any]) -> str:
 
 
 def rules_digest(config: Config) -> str:
-    """Digest of what decides a Lean verdict (RULES_INPUT): permitted axioms, external kernels, the Lean project and
-    the roots. Paths of this machine (`packages`, `cache`) are left out: what Lake builds against is bound by
-    `lake-manifest.json` and `lean-toolchain`, each a trusted input of its own; so are resource limits, tool paths and
-    lanes, so editing them does not stale receipts (the modules a check reads are recorded one by one)."""
-    return _digest({"lean": _rules(config)})
+    """Digest of what decides a Lean verdict (RULES_INPUT): permitted axioms, mandatory external-kernel minimum,
+    the Lean project and the roots. Paths of this machine (`packages`, `cache`) are left out: what Lake builds against
+    is bound by `lake-manifest.json` and `lean-toolchain`, each a trusted input of its own; so are resource limits, tool
+    paths and lanes, so editing them does not stale receipts (the modules a check reads are recorded one by one)."""
+    return _digest({"lean": _rules(config, external_minimum=True)})
 
 
 def verdict_digest(config: Config) -> str:
     """VERDICT_INPUT, as receipts that recorded it computed it: the rules plus the `packages` and `cache` paths."""
     lean = config.lean
-    return _digest({"lean": {**_rules(config), "packages": lean.packages, "cache": lean.cache}})
+    return _digest({"lean": {**_rules(config, external_minimum=False), "packages": lean.packages, "cache": lean.cache}})
 
 
 def check_digest(config: Config) -> str:
     """CHECK_INPUT, as receipts that recorded it computed it: VERDICT_INPUT without the roots."""
-    basis = {**_rules(config), "packages": config.lean.packages, "cache": config.lean.cache}
+    basis = {**_rules(config, external_minimum=False), "packages": config.lean.packages, "cache": config.lean.cache}
     del basis["roots"]
     return _digest({"lean": basis})
+
+
+def historical_config_binding(trusted_files: dict[str, Any] | None) -> str | None:
+    """Which legacy configuration binding (`research/vl.toml`, `#verdict`, or `#check`) `trusted_files` uses, or None."""
+    if not isinstance(trusted_files, dict) or RULES_INPUT in trusted_files:
+        return None
+    for key in (VERDICT_INPUT, CHECK_INPUT, CONFIG_PATH):
+        if key in trusted_files:
+            return key
+    return None
 
 
 def config_digest(input_name: str, config: Config) -> str:
@@ -217,10 +239,17 @@ def resolve_trusted_ref(root: Path, explicit: str | None = None) -> tuple[str, s
     return ref, source
 
 
-def load_config(start: Path, trusted_ref: str | None = None) -> Config:
+def load_config(start: Path, trusted_ref: str | None = None, *,
+                batch_anchor: tuple[str, str, str] | None = None) -> Config:
     """The configuration as committed on the trusted ref; the worktree's copy only while the trusted ref has none."""
     root = find_root(start.resolve())
-    ref, ref_source = resolve_trusted_ref(root, trusted_ref)
+    if batch_anchor is None:
+        ref, ref_source = resolve_trusted_ref(root, trusted_ref)
+        commit = gitref.rev_parse(root, ref) if gitref.ref_exists(root, ref) else None
+    else:
+        commit, ref, ref_source = batch_anchor
+        if not gitref.is_full_sha(commit) or gitref.rev_parse(root, commit) != commit:
+            raise ConfigError("the batch question must name an available full commit")
     warnings: list[tuple[str, str]] = []
     if ref_source == "default":
         warnings.append((f"git config {TRUSTED_REF_KEY}",
@@ -229,7 +258,6 @@ def load_config(start: Path, trusted_ref: str | None = None) -> Config:
     worktree = (root / CONFIG_PATH).read_bytes()
     # The trusted ref is resolved once: every trusted read of this command is of that one commit. A ref that does
     # not resolve admits nothing (vl validate reports it).
-    commit = gitref.rev_parse(root, ref) if gitref.ref_exists(root, ref) else None
     trusted = gitref.show(root, commit, CONFIG_PATH) if commit else None
     config = None
     if trusted is None:

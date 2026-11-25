@@ -14,14 +14,15 @@ import json
 import posixpath
 import re
 
-from .. import gitref, machine
+from .. import gitref, ladder, leanmod, machine
 from ..adapters.lean_comparator import PROJECT_FILES, witness_problems
-from ..config import CONFIG_PATH, TRUSTED_REF_KEY
-from ..output import emit
-from ..records import QUESTION_FIELDS, RecordError, parse_item, question_fields, review_problems
-from ..render import PROPOSAL, Context, body_links, prose_edits, split_ref, trust_data, trust_text
-from ..status import (UNDETERMINED, answer_mismatch, counted_verdict, fidelity, probe_gaps, probe_hits,
-                      receipt_order)
+from ..config import CONFIG_PATH, TRUSTED_REF_KEY, ConfigError, parse_config
+from ..output import emit, fail
+from ..records import ORIGIN_ASKED_AFTER, QUESTION_FIELDS, RecordError, parse_item, question_fields, review_problems
+from ..render import (FINDINGS_SHOWN, PROPOSAL, Context, body_links, boundary_text, finding_text, prose_edits,
+                      split_ref, trust_data, trust_text)
+from ..status import (UNDETERMINED, answer_mismatch, counted_verdict, fidelity, probe_definitions, probe_findings,
+                      probe_gaps, probe_hits, receipt_order, unnamed_definitions)
 from . import open_repo
 from ..repo import CACHE_DIR, EVALUATORS, EVIDENCE, ITEMS, REVIEWS, TARGETS, Repo, input_file
 
@@ -92,17 +93,22 @@ class Findings:
 
 
 def register(sub):
-    p = sub.add_parser("validate", help="check references, receipts, reviews, targets and explanations")
+    p = sub.add_parser("validate", help="check records, references, receipts, reviews and targets (exit 1 on errors; warnings do not change it)")
     p.add_argument("--incoming", metavar="BRANCH",
                    help="also inspect what BRANCH changes relative to the trusted ref")
     return p
 
 
+def _item_refs(item) -> list[tuple[str, str]]:
+    """(where, reference) of everything the item points at: its relations, `[origin] from` and the links of its body."""
+    refs = [(name, ref) for name in RELATION_FIELDS for ref in getattr(item, name)]
+    refs += [("origin.from", ref) for ref in item.origin.get("from", ())]
+    return refs + [("body link", f"{i}@{r}" if r else i) for i, r in body_links(item.body)]
+
+
 def _references(repo: Repo, ctx: Context, broken: set[str], f: Findings) -> None:
     for item in ctx.items.values():
-        refs = [(name, ref) for name in RELATION_FIELDS for ref in getattr(item, name)]
-        refs += [("body link", f"{i}@{r}" if r else i) for i, r in body_links(item.body)]
-        for name, ref in refs:
+        for name, ref in _item_refs(item):
             ref_id, rev = split_ref(ref)
             if ref_id in broken:
                 continue  # its parse error is already reported
@@ -155,6 +161,22 @@ def _cycles(ctx: Context, f: Findings) -> None:
             visit(node, [node])
 
 
+def _imports(repo: Repo, ctx: Context, f: Findings) -> None:
+    """Validate `[[imports]]` lineage, module/declaration bindings, unused imports, and unlinked dependencies."""
+    from .. import imports as vl_imports
+
+    for item in ctx.items.values():
+        if item.imports:
+            resolved, errors = vl_imports.resolve_imports(repo, item, commit=None)
+            for err in errors:
+                f.error(item.path, err)
+            for note in vl_imports.unpropagated_constraints(item, resolved):
+                f.warn(item.path, note)
+        if item.imports or item.lean:
+            for err in vl_imports.check_consumer_lean_usage(repo, item, commit=None):
+                f.error(item.path, err)
+
+
 def _target(repo: Repo, ctx: Context, f: Findings) -> None:
     prefix = repo.rel(TARGETS) + "/"
     for item in ctx.items.values():
@@ -183,6 +205,43 @@ def _target(repo: Repo, ctx: Context, f: Findings) -> None:
             f.error(item.path, problem)
 
 
+def _unbuilt_modules(repo: Repo, f: Findings) -> None:
+    """A module under [lean] roots that `lake build <lib>` leaves out (leanmod.unbuilt), by the libraries of the
+    lakefile.toml on the trusted ref and the Lean files git tracks in the worktree: it compiles only where something
+    else imports it. A library the lakefile or a header does not describe with confidence says nothing, and so does a
+    project with a lakefile.lean, which Lake reads instead."""
+    project = posixpath.normpath(repo.config.lean.project.strip() or ".")
+    lakefile = posixpath.normpath(posixpath.join(project, "lakefile.toml"))
+    raw = repo.read_trusted(lakefile)
+    if raw is None or repo.read_trusted(posixpath.normpath(posixpath.join(project, "lakefile.lean"))) is not None:
+        return
+    try:
+        libraries = leanmod.lean_libraries(raw)
+    except leanmod.LeanModError:
+        return
+    for lib in libraries:
+        base = posixpath.normpath(posixpath.join(project, lib.src_dir))
+        if base == ".." or base.startswith(("../", "/")):
+            continue              # sources outside the repository
+        modules = {}
+        for path in gitref.tracked_files(repo.root, base):
+            try:
+                if path.endswith(".lean") and (repo.root / path).is_file():
+                    modules[leanmod.path_to_module(posixpath.relpath(path, base))] = path
+            except leanmod.LeanModError:
+                continue          # a path that names no plain Lean module
+        try:
+            left_out = leanmod.unbuilt(lib, modules, lambda path: (repo.root / path).read_bytes())
+        except (leanmod.LeanModError, OSError):
+            continue
+        for module in left_out:
+            if leanmod.in_roots(module, repo.config.lean.roots):
+                f.warn(modules[module], f"`lake build {lib.name}` leaves {module} out: no module its globs "
+                                        f"({', '.join(lib.globs)}) select imports it; import it from "
+                                        f"{' or '.join(lib.roots)}, or add a glob in {lakefile} (read from the "
+                                        "trusted ref)")
+
+
 def _process_state(ctx: Context, f: Findings) -> None:
     """A warning per prose field that writes process state (PROCESS_STATE), naming the phrases found."""
     for item in ctx.items.values():
@@ -196,6 +255,20 @@ def _process_state(ctx: Context, f: Findings) -> None:
                 f.warn(item.path, f"{name}: process state written into the record ({phrases}): status is derived from "
                                   "receipts and reviews, and this goes stale; remove it (quote it in a fenced code "
                                   "block if it is meant as a quote)")
+
+
+def _origins(ctx: Context, f: Findings) -> None:
+    """Items created after ORIGIN_ASKED_AFTER say who made them (`[origin]`) and, with a target, where the statement
+    comes from (`[provenance]`). A warning only: both are declared by the author, and older items are not asked."""
+    for item in ctx.items.values():
+        if str(item.created)[:10] <= ORIGIN_ASKED_AFTER:
+            continue
+        if not item.origin:
+            f.warn(item.path, "no [origin]: say which agent made this item, with which model and context, and from "
+                              "which records or ideas it came (docs/SPEC.md, Items)")
+        if (item.lean or item.python) and not item.provenance:
+            f.warn(item.path, "no [provenance]: say whether the statement is upstream-reviewed, lab-authored, "
+                              "model-authored or your own, with its source")
 
 
 def _records(repo: Repo, ctx: Context, broken: set[str], f: Findings) -> tuple[int, int]:
@@ -289,15 +362,47 @@ def _probes(ctx: Context, item, status, f: Findings) -> None:
                           "vacuity or triviality is established; run vl check --protected again")
     witnesses = _witnesses(item)
     _witness_requirement(item, receipt, witnesses, f)
-    trivial = [(name, tactic) for name, tactic in probe_hits(receipt, "trivial_by") if name not in witnesses]
-    if not trivial:          # a witness is expected to be easy: an instance, often closed by `decide`
-        return
     state = fidelity(ctx.repo, item)
-    if state is not None and "trivial" in state.acknowledges:
+    # a witness is expected to be easy: an instance, often closed by `decide`
+    trivial = [(name, tactic) for name, tactic in probe_hits(receipt, "trivial_by") if name not in witnesses]
+    if trivial and not (state is not None and "trivial" in state.acknowledges):
+        names = ", ".join(f"{name} by `{tactic}`" for name, tactic in trivial)
+        f.warn(item.path, f"automation alone closes {names}: if that is intended, record a fidelity review of the "
+                          "current target with --acknowledge trivial; otherwise the target is too weak")
+    _meaning_questions(item, receipt, witnesses, state, f)
+
+
+def _meaning_questions(item, receipt: dict, witnesses: set[str], state, f: Findings) -> None:
+    """What the statement probes list for a referee (ADR 0010): the in-project definitions the statement
+    depends on that no fidelity review of the current meaning names, and, until a review finds the target faithful,
+    its totalized operations and the boundary values where it is vacuous or closed by automation. Set-theoretic
+    foundations are asked until a fidelity review of the current target acknowledges them, whatever its verdict."""
+    unnamed = unnamed_definitions(probe_definitions(receipt), state.texts if state is not None else ())
+    if unnamed:
+        f.warn(item.path, f"definition adequacy: the statement depends on in-project definitions that no fidelity "
+                          f"review of the current meaning names: {', '.join(unnamed)}; Comparator checks that they "
+                          "are the trusted ones, not that they mean what the question asks: a fidelity review must "
+                          "answer for each, by name")
+    foundations = probe_findings(receipt, "foundations", witnesses)
+    if foundations and not (state is not None and "foundations" in state.acknowledges):
+        shown = "; ".join(f"{name}: {finding_text(x, 'const')}" for name, x in foundations[:FINDINGS_SHOWN])
+        more = f"; {len(foundations) - FINDINGS_SHOWN} more on the card" if len(foundations) > FINDINGS_SHOWN else ""
+        f.warn(item.path, f"set-theoretic foundations in the target: {shown}{more}; the list of permitted axioms says "
+                          "nothing here (Lean always admits Classical.choice): a specialist fidelity review of the "
+                          "current target must say what the statement asserts about Choice and the set theory it "
+                          "works in, and record --acknowledge foundations")
+    if state is not None and state.label == "faithful":
         return
-    names = ", ".join(f"{name} by `{tactic}`" for name, tactic in trivial)
-    f.warn(item.path, f"automation alone closes {names}: if that is intended, record a fidelity review of the "
-                      "current target with --acknowledge trivial; otherwise the target is too weak")
+    totalized = probe_findings(receipt, "totalized", witnesses)
+    if totalized:
+        shown = "; ".join(f"{name}: {finding_text(x, 'term')}" for name, x in totalized[:FINDINGS_SHOWN])
+        more = f"; {len(totalized) - FINDINGS_SHOWN} more on the card" if len(totalized) > FINDINGS_SHOWN else ""
+        f.warn(item.path, f"totalized operations in the target: {shown}{more}; a fidelity review must say whether "
+                          "each is guarded by a hypothesis or meant")
+    boundary = probe_findings(receipt, "boundary", witnesses)
+    if boundary:
+        f.warn(item.path, "boundary values: " + "; ".join(f"{name}: {boundary_text(x)}" for name, x in boundary)
+               + "; a fidelity review must say whether that is meant at those values")
 
 
 def _unreviewed_prose(ctx: Context, item, status, f: Findings) -> None:
@@ -323,7 +428,7 @@ def _statuses(ctx: Context, f: Findings) -> None:
         if status.label in PROTECTED_PASS:
             state = fidelity(ctx.repo, item)
             if state is not None and state.label != "faithful":
-                f.warn(item.path, f"{status.label} against a target whose fidelity is '{state.label}': record "
+                f.warn(item.path, f"{ladder.human_label(status.label)} against a target whose fidelity is '{state.label}': record "
                                   "vl review --kind fidelity after reading the admitted target")
             elif state is not None and state.legacy:
                 f.warn(item.path, "the faithful fidelity review predates meaning binding: it binds the target file "
@@ -351,7 +456,7 @@ def _statuses(ctx: Context, f: Findings) -> None:
                 if label in BAD_FOR_CITATION:
                     f.error(item.path, f"explanation {name} '{ref_id}', which is {label}")
                 elif ctx.items[ref_id].kind in STATUS_KINDS and label != "verified":
-                    f.warn(item.path, f"explanation {name} '{ref_id}', which is not verified (status: {label})")
+                    f.warn(item.path, f"explanation {name} '{ref_id}', whose check has not passed (status: {ladder.human_label(label)})")
 
 
 def _trusted_reason(repo: Repo, path: str) -> str | None:
@@ -423,13 +528,18 @@ def _question_change(repo: Repo, path: str, branch: str) -> list[str]:
     old, new = versions
     if old is None or new is None:
         return []
-    return [f"[{table}] {key}" for table, keys in QUESTION_FIELDS.items() for key in keys
-            if old[table].get(key) != new[table].get(key)]
+    changed = [f"[{table}] {key}" for table, keys in QUESTION_FIELDS.items() for key in keys
+               if old[table].get(key) != new[table].get(key)]
+    if old.get("imports") != new.get("imports"):
+        changed.append("[[imports]]")
+    return changed
 
 
 REVIEW_EFFECTS = {"retraction": "merging it retracts the item",
                   "correction": "merging it puts a correction at the top of the item's card",
-                  "fidelity": "merging it decides whether the target means what the question asks"}
+                  "fidelity": "merging it decides whether the target means what the question asks",
+                  "correspondence": "merging it records how the target's statement relates to the paper's "
+                                    "(a row of the verdict ladder; no status changes)"}
 
 
 def _added_review(repo: Repo, branch: str, path: str) -> tuple[bool, str]:
@@ -460,9 +570,7 @@ def _incoming_items(repo: Repo, branch: str, paths: list[str], f: Findings) -> N
         except RecordError as exc:
             f.error(path, f"on {branch}: {exc}")
             continue
-        refs = [(name, ref) for name in RELATION_FIELDS for ref in getattr(item, name)]
-        refs += [("body link", f"{i}@{r}" if r else i) for i, r in body_links(item.body)]
-        for name, ref in refs:
+        for name, ref in _item_refs(item):
             if split_ref(ref)[0] not in there:
                 f.error(path, f"on {branch}: {name} '{ref}': no item '{split_ref(ref)[0]}' exists on {branch}")
         for ref in item.answers:
@@ -470,6 +578,11 @@ def _incoming_items(repo: Repo, branch: str, paths: list[str], f: Findings) -> N
             mismatch = answer_mismatch(question, item) if question is not None else None
             if mismatch:
                 f.error(path, f"on {branch}: answers '{ref}': {mismatch}")
+        if item.imports:
+            from .. import imports as vl_imports
+            _, imp_errors = vl_imports.resolve_imports(repo, item, commit=branch)
+            for err in imp_errors:
+                f.error(path, f"on {branch}: {err}")
 
 
 def _branch_question(repo: Repo, branch: str, item_id: str):
@@ -543,9 +656,49 @@ def _incoming(repo: Repo, ctx: Context, branch: str, f: Findings) -> tuple[list[
     return sorted(trusted.values(), key=lambda row: row["path"]), stale
 
 
+def _research_config(repo: Repo, f: Findings, branch: str | None = None) -> None:
+    """Validate optional rubrics and context paths even without records or notes."""
+    from ..appraisals import manifest
+    from ..context import settings
+
+    def check(config, location: str, sections=("appraisal", "context")) -> None:
+        for section in sections:
+            try:
+                if section == "appraisal":
+                    manifest(Repo(config))
+                else:
+                    settings(config)
+            except (ConfigError, RecordError) as exc:
+                f.error(CONFIG_PATH, f"{location} {section}: {exc}")
+
+    if branch is not None:
+        raw = gitref.show(repo.root, branch, CONFIG_PATH)
+        try:
+            if raw is not None:
+                check(parse_config(repo.root, raw.decode("utf-8")), f"on {branch}")
+        except (ConfigError, UnicodeError) as exc:
+            f.error(CONFIG_PATH, f"on {branch}: {exc}")
+        return
+    check(repo.config, "trusted")
+    try:
+        local = repo.worktree_config()
+        changed = tuple(section for section in ("appraisal", "context")
+                        if local.raw.get(section) != repo.config.raw.get(section)
+                        or section == "context" and local.research_dir != repo.config.research_dir)
+        check(local, "worktree", changed)
+    except (ConfigError, UnicodeError) as exc:
+        f.error(CONFIG_PATH, f"worktree configuration: {exc}")
+
+
 def run(args) -> int:
     repo = open_repo(args, warn=False)
+    if args.incoming and not gitref.ref_exists(repo.root, args.incoming):
+        return fail(f"--incoming {args.incoming}: no such branch or commit in this repository; fetch it, or name one "
+                    "that `git branch -a` lists")
     f = Findings()
+    _research_config(repo, f)
+    if args.incoming:
+        _research_config(repo, f, args.incoming)
     if not gitref.ref_exists(repo.root, repo.config.trusted_ref):
         f.error(f"git config {TRUSTED_REF_KEY}", f"trusted ref '{repo.config.trusted_ref}' (from "
                 f"{repo.config.trusted_ref_source}) does not resolve to a commit")
@@ -570,7 +723,10 @@ def run(args) -> int:
     _answers(ctx, f)
     _cycles(ctx, f)
     _target(repo, ctx, f)
+    _imports(repo, ctx, f)
+    _unbuilt_modules(repo, f)
     _process_state(ctx, f)
+    _origins(ctx, f)
     n_receipts, n_reviews = _records(repo, ctx, broken, f)
     _cache(repo, f)
     _statuses(ctx, f)

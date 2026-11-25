@@ -493,14 +493,14 @@ def test_a_trusted_ref_given_on_the_command_line_is_named_on_every_status(resear
     monkeypatch.chdir(root)
     assert main(["show", "add-zero"]) == 0
     out = capsys.readouterr().out
-    assert "status: pending-admission]" in out and "trusted ref lane/y" not in out      # control
+    assert "status: pending-admission;" in out and "trusted ref lane/y" not in out      # control
     for argv in (["show", "add-zero"], ["show", "add-zero", "--brief"], ["show", "add-zero", "--impact"],
                  ["find", "small"], ["validate"]):
         main([*argv, "--trusted-ref", "lane/y"])
         out = capsys.readouterr().out
         assert "lane/y" in out and "--trusted-ref" in out, (argv, out)
     main(["show", "add-zero", "--trusted-ref", "lane/y"])
-    assert "status: verified under trusted ref lane/y (--trusted-ref)" in capsys.readouterr().out
+    assert "status: check passed under trusted ref lane/y (--trusted-ref)" in capsys.readouterr().out
 
 
 # A9, A10: an admitted failure or a demonstrated vacuity is never lost to a tie or an inconclusive rerun -----------
@@ -554,6 +554,27 @@ def test_a_rejection_line_from_a_killed_comparator_or_from_the_candidate_is_not_
     own = BUILT + "Exporting #[Nat] from VLSolution\nRunning nanoda kernel on solution\nnanoda kernel rejected the solution\n"
     control = classify(own, "uncaught exception: nanoda exited with 1\n", 1, ("main",))
     assert control.verdict == "fail" and "nanoda kernel rejected" in control.reason
+
+
+def test_a_comparator_service_that_systemd_ended_abnormally_is_never_a_verdict():
+    """systemd-run exits 1 for a service result other than success or exit-code (a stop timeout after Comparator
+    exited 0, the memory cap's oom-kill), whatever Comparator printed: neither its acceptance nor its rejection
+    lines count then. Planted: the output of a historical protected receipt (both kernels accepted, exit 1)."""
+    from verifylab.adapters.lean_comparator import classify
+    accepted = BUILT + ("Exporting #[Nat] from VLSolution\nRunning nanoda kernel on solution\n"
+                        "nanoda kernel accepts the solution\nRunning Lean default kernel on solution.\n"
+                        "Lean default kernel accepts the solution\nYour solution is okay!\n")
+    timeout = ("systemd ended the service with result 'timeout' (main process: code=exited, status=0/SUCCESS); "
+               "exit status 1 is systemd's, not the command's")
+    planted = classify(accepted, "", 1, ("main",), ("lean", "nanoda"), service=timeout)
+    assert planted.verdict == "error" and timeout in planted.reason, planted
+    assert classify(accepted, "", 0, ("main",), ("lean", "nanoda")).verdict == "pass"            # clean control
+    rejected = BUILT + ("Exporting #[Nat] from VLSolution\nRunning nanoda kernel on solution\n"
+                        "nanoda kernel rejected the solution\n")
+    oom = "systemd ended the service with result 'oom-kill': the memory cap was reached (main process: …)"
+    stderr = "uncaught exception: nanoda exited with 1\n"
+    assert classify(rejected, stderr, 1, ("main",), service=oom).verdict == "error"
+    assert classify(rejected, stderr, 1, ("main",)).verdict == "fail"                            # clean control
 
 
 def _layout(tmp_path: Path, child: str):
@@ -654,21 +675,23 @@ def test_run_keeps_the_output_bounded_and_raises_on_its_deadline(bare_jail, tmp_
 
 
 def test_every_step_of_a_lean_check_runs_within_the_one_remaining_budget(tmp_path, monkeypatch):
+    import threading
     import time
     from types import SimpleNamespace
     from verifylab.adapters import lean_comparator
     from verifylab import jail
     seen = []
     monkeypatch.setattr(jail, "run", lambda box, command, timeout, **kw: seen.append(timeout) or
-                        __import__("subprocess").CompletedProcess(command, 0, b"", b""))
+                        jail.Completed(command, 0, b"", b"", None))
     check = lean_comparator._Check.__new__(lean_comparator._Check)
     check.req = SimpleNamespace(timeout=30.0, memory_max=None, memory_total=None, scratch=tmp_path)
     check.started, check.log = time.monotonic() - 25.0, []
-    check.preflight(None, tmp_path / "pre", "leanprover/lean4:v4.0.0", "", {}, tmp_path, ["Mathlib"])
+    cancel = threading.Event()
+    check.preflight(None, tmp_path / "pre", "leanprover/lean4:v4.0.0", "", {}, tmp_path, ["Mathlib"], cancel)
     assert seen and seen[-1] <= 5.0                                  # not the 60 s floor it had
     check.started = time.monotonic() - 31.0
     with pytest.raises(lean_comparator._Stop, match="timed out"):
-        check.preflight(None, tmp_path / "pre2", "leanprover/lean4:v4.0.0", "", {}, tmp_path, ["Mathlib"])
+        check.preflight(None, tmp_path / "pre2", "leanprover/lean4:v4.0.0", "", {}, tmp_path, ["Mathlib"], cancel)
 
 
 @pytest.mark.parametrize("value", ["nan", "inf", "-inf"])
@@ -852,22 +875,24 @@ def test_conflicting_fidelity_reviews_of_the_same_instant_resolve_to_the_adverse
     _with_target(root)
     monkeypatch.chdir(root)
     monkeypatch.setattr(review_module, "datetime", Still)
-    weak = _fidelity_review(capsys, "too-weak", "main misses the integers", dry_run=True)["review_id"][:16]
-    text = next(t for t in (f"main says double n = 2 n ({k})" for k in range(200))
-                if (_fidelity_review(capsys, "faithful", t, dry_run=True)["review_id"][:16] > weak)
-                == faithful_path_sorts_last)
+    # Vary both hashes: one fixed hash near the end of the range made the former bounded search flaky.
+    for k in range(100):
+        text, weak_text = f"main says double n = 2 n ({k})", f"main misses the integers ({k})"
+        weak = _fidelity_review(capsys, "too-weak", weak_text, dry_run=True)["review_id"][:16]
+        faithful = _fidelity_review(capsys, "faithful", text, dry_run=True)["review_id"][:16]
+        if (faithful > weak) == faithful_path_sorts_last:
+            break
+    else:
+        pytest.fail("could not construct the requested hash-order fixture")
     first = _fidelity_review(capsys, "faithful", text)
-    second = _fidelity_review(capsys, "too-weak", "main misses the integers")
+    second = _fidelity_review(capsys, "too-weak", weak_text)
     assert first["created"] == second["created"]                                      # a real tie
     commit_all(root, "two reviews of the same instant")
     state = _fidelity(root)
     assert state.label == "disputed: too-weak" and state.review.endswith(f"{second['review_id'][:16]}.json"), state
 
 
-def test_a_later_review_still_decides_and_equal_verdicts_tie_harmlessly(research_repo, monkeypatch, capsys):
-    """Controls: chronology at full precision (a faithful review a microsecond after a too-weak one decides; a review
-    recorded to the second, as earlier versions wrote them, is older than one later in that second), and two
-    faithful reviews of the same instant stay faithful."""
+def test_only_explicit_same_author_supersession_resolves_dissent(research_repo, monkeypatch, capsys):
     from verifylab.status import meaning, meaning_digest
     root = research_repo
     _with_target(root)
@@ -889,12 +914,20 @@ def test_a_later_review_still_decides_and_equal_verdicts_tie_harmlessly(research
     assert _fidelity(root).label == "disputed: too-weak"
     review("faithful", "2026-10-02T19:15:43.000002+02:00", "a microsecond later again, in another zone")
     commit_all(root, "a later faithful review")
+    assert _fidelity(root).label == "disputed: too-weak"
+    adverse = next(r.data for r in Repo.open(root).reviews("add-zero") if r.data.get("verdict") == "too-weak")
+    args = ["review", "add-zero", "--kind", "fidelity", "--verdict", "faithful", "--text", "Revised judgment",
+            "--supersedes-review", adverse["review_id"], "--expected-meaning-digest", adverse["meaning_digest"]]
+    monkeypatch.chdir(root)
+    assert main([*args, "--author", "agent:other"]) == 2
+    assert main([*args, "--author", "agent:ref"]) == 0
+    commit_all(root, "admit explicit same-author revision")
     assert _fidelity(root).label == "faithful"
 
 
 # CHEATS R25: the card shows the prose its status and fidelity hold for; a worktree edit is an unreviewed proposal ---
 
-RIEMANN = "This algorithm proves the Riemann hypothesis for all inputs."
+STRONGER_CLAIM = "This algorithm terminates for all inputs."
 
 
 def _card(capsys, *args) -> dict:
@@ -913,22 +946,22 @@ def test_an_uncommitted_stronger_claim_is_shown_as_an_unreviewed_proposal(resear
     from verifylab.render import PROPOSAL
     root = research_repo
     item = _verified_and_reviewed(root, monkeypatch, capsys)
-    _replace(item, "For every n, n + 0 = n.", RIEMANN)                     # not committed
+    _replace(item, "For every n, n + 0 = n.", STRONGER_CLAIM)                     # not committed
     _replace(item, 'limits = ["Only natural numbers."]', "limits = []")
     card = _card(capsys)["items"][0]
     assert (card["status"]["label"], card["fidelity"]["label"]) == ("verified", "faithful")
     assert card["statement"] == "For every n, n + 0 = n." and card["limits"] == ["Only natural numbers."]
     assert card["proposed"] == {"label": PROPOSAL, "revision": card["revision"], "fields": ["statement", "limits"],
-                                "statement": RIEMANN, "limits": []}
+                                "statement": STRONGER_CLAIM, "limits": []}
     assert main(["show", "add-zero"]) == 0
     out = capsys.readouterr().out
     assert f"{PROPOSAL}: statement, limits" in out.splitlines()[0]
     assert out.index("For every n, n + 0 = n.") < out.index("STATUS")
-    assert out.index("PROPOSED") < out.index(RIEMANN) < out.index("STATUS")
-    assert out.count(RIEMANN) == 1 and "limits: none stated" in out
+    assert out.index("PROPOSED") < out.index(STRONGER_CLAIM) < out.index("STATUS")
+    assert out.count(STRONGER_CLAIM) == 1 and "limits: none stated" in out
     brief = _card(capsys, "--brief")["brief"]
     assert f"{PROPOSAL}: statement, limits" in brief.splitlines()[0]
-    assert brief.index("statement:\n  For every n, n + 0 = n.") < brief.index("proposed:") < brief.index(RIEMANN)
+    assert brief.index("statement:\n  For every n, n + 0 = n.") < brief.index("proposed:") < brief.index(STRONGER_CLAIM)
     assert main(["validate", "--json"]) == 0
     warnings = [w["message"] for w in json.loads(capsys.readouterr().out)["warnings"]
                 if w["where"] == "research/items/add-zero.md"]
@@ -946,10 +979,10 @@ def test_an_unbound_or_integrated_edit_is_no_proposal(research_repo, monkeypatch
     assert card.get("proposed") is None and card["title"] == "A small result, renamed"
     assert main(["validate", "--json"]) == 0
     assert not any("not reviewed" in w["message"] for w in json.loads(capsys.readouterr().out)["warnings"])
-    _replace(item, "For every n, n + 0 = n.", RIEMANN)
+    _replace(item, "For every n, n + 0 = n.", STRONGER_CLAIM)
     commit_all(root, "integrate the stronger claim")
     card = _card(capsys)["items"][0]
-    assert card.get("proposed") is None and card["statement"] == RIEMANN
+    assert card.get("proposed") is None and card["statement"] == STRONGER_CLAIM
     assert card["fidelity"]["label"] == "review stale: claim changed since review"
 
 

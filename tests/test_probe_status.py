@@ -147,7 +147,7 @@ def test_card_states_proof_and_meaning_separately(research_repo, monkeypatch, ca
     commit_all(root)
     rc, out, _ = vl(capsys, "show", "add-zero")
     order = ["STATUS", "PROOF (kernels, axioms, statement probes)", "protected pass", "kernels lean, nanoda",
-             "axioms within propext", "- VL.AddZero.main: TRIVIAL: closed by `simp` alone; 1 Prop hypothesis, not refuted",
+             "· axioms within propext", "- VL.AddZero.main: TRIVIAL: closed by `simp` alone; 1 Prop hypothesis, not refuted",
              "MEANING", "  fidelity: not reviewed", "EVIDENCE"]
     positions = [out.index(marker) for marker in order]
     assert positions == sorted(positions), out
@@ -352,3 +352,160 @@ def test_premise_vacuity_scope_is_visible_even_when_no_probe_is_skipped(research
     assert "1 Prop hypothesis, not refuted" in out
     assert "premise-vacuity skipped" not in out
     assert status(root).label == "verified"
+
+
+# What the probes list for a referee: definitions, totalized operations, boundary values (ADR 0010) -----------
+
+GAP = {"op": "nat_sub", "term": "a - b", "in": "Fixture.gap", "why": "subtraction in ℕ truncates: a - b = 0 when a < b"}
+AT_ZERO = {"binder": "n", "value": 0, "vacuous_by": "intros; omega"}
+
+
+def test_definition_adequacy_warns_until_a_faithful_review_names_each_definition(research_repo, monkeypatch, capsys):
+    root = research_repo
+    monkeypatch.chdir(root)
+    with_target(root)
+    receipt(root, {"VL.AddZero.main": {**NULL, "definitions": ["Fixture.gap", "Fixture.Box"], "totalized": []}})
+    commit_all(root)
+    assert status(root).label == "verified"                       # information, never a status
+    message = "definition adequacy: the statement depends on in-project definitions that no fidelity review"
+    assert any(message in w and "Fixture.gap, Fixture.Box" in w for w in warnings(capsys))
+    out = vl(capsys, "show", "add-zero")[1]
+    meaning = out[out.index("MEANING"):out.index("EVIDENCE")]
+    assert "definition adequacy (Comparator checks" in meaning and "Fixture.gap, Fixture.Box" in meaning
+    assert "not named by any fidelity review of the current meaning: Fixture.gap, Fixture.Box" in meaning
+    # A faithful review that names one of them leaves the other one asked.
+    vl(capsys, "review", "add-zero", "--kind", "fidelity", *meaning_args(), "--verdict", "faithful", "--author",
+       "agent:referee", "--text", "Fixture.gap is truncated subtraction, as the question means.")
+    commit_all(root)
+    found = [w for w in warnings(capsys) if message in w]
+    assert len(found) == 1 and "Fixture.Box" in found[0] and "Fixture.gap" not in found[0], found
+    vl(capsys, "review", "add-zero", "--kind", "fidelity", *meaning_args(), "--verdict", "faithful", "--author",
+       "agent:referee", "--text", "`Box` is a pair of naturals: width and height, as meant.")
+    commit_all(root)
+    assert not any(message in w for w in warnings(capsys))
+    card = json.loads(vl(capsys, "show", "add-zero", "--json")[1])["items"][0]
+    assert card["definitions"] == {"names": ["Fixture.gap", "Fixture.Box"], "not_named": []}
+    assert status(root).label == "verified"
+
+
+def test_no_in_project_definition_asks_nothing(research_repo, monkeypatch, capsys):
+    """The clean control: probes that list no definition (or a receipt from before they did) ask nothing."""
+    root = research_repo
+    monkeypatch.chdir(root)
+    with_target(root)
+    receipt(root, {"VL.AddZero.main": {**NULL, "definitions": [], "totalized": []}})
+    receipt(root, {"VL.AddZero.main": NULL}, finished="t0")
+    commit_all(root)
+    assert not any("definition adequacy" in w or "totalized" in w or "boundary values" in w for w in warnings(capsys))
+    out = vl(capsys, "show", "add-zero")[1]
+    assert "definition adequacy (" not in out and "totalized:" not in out and "boundary values:" not in out
+
+
+def test_totalized_operations_and_boundary_values_warn_until_a_faithful_review(research_repo, monkeypatch, capsys):
+    root = research_repo
+    monkeypatch.chdir(root)
+    with_target(root)
+    entry = {**NULL, "prop_hypotheses": 1, "definitions": [], "boundary": [AT_ZERO],
+             "totalized": [{**GAP, "in": "statement"}, GAP], "limit_reached": {"totalized": ["scan"]}}
+    set_lean(root, ["VL.AddZero.main", "VL.AddZero.witness"], ["VL.AddZero.witness"])
+    receipt(root, {"VL.AddZero.main": entry, "VL.AddZero.witness": entry})
+    commit_all(root)
+    assert status(root).label == "verified"
+    found = warnings(capsys)
+    totalized = [w for w in found if "totalized operations in the target" in w]
+    assert len(totalized) == 1 and "VL.AddZero.main: `a - b` (subtraction in ℕ truncates" in totalized[0]
+    assert "in definition Fixture.gap" in totalized[0] and "VL.AddZero.witness" not in totalized[0]
+    assert any("boundary values: VL.AddZero.main: at n = 0 `intros; omega` refutes its hypotheses" in w
+               and "witness" not in w for w in found), found
+    out = vl(capsys, "show", "add-zero")[1]
+    assert "  boundary values: at n = 0 `intros; omega` refutes its hypotheses" in out
+    assert "  totalized: `a - b` (subtraction in ℕ truncates: a - b = 0 when a < b) in definition Fixture.gap" in out
+    assert "  totalized: the scan stopped early" in out
+    vl(capsys, "review", "add-zero", "--kind", "fidelity", *meaning_args(), "--verdict", "faithful", "--author",
+       "agent:referee", "--text", "Truncation is guarded by the hypothesis; n = 0 is excluded on purpose.")
+    commit_all(root)
+    found = warnings(capsys)
+    assert not any("totalized operations" in w or "boundary values" in w for w in found), found
+    assert "totalized: `a - b`" in vl(capsys, "show", "add-zero")[1]          # the card keeps showing them
+
+
+# Set-theoretic foundations: the axiom list says nothing there, a review must answer -----------------------------
+
+CARD = {"kind": "cardinal", "const": "Cardinal.mk", "in": "statement",
+        "why": "cardinals are compared and added with Classical.choice behind them (every set is well-orderable): a "
+               "statement whose truth depends on Choice, or on its failure, cannot be told from one that does not"}
+AC = {"kind": "choice", "const": "Fixture.AC", "in": "Fixture.choiceFn",
+      "why": "names a choice principle: Lean admits Classical.choice whatever the statement says, so the axiom list "
+             "cannot show whether it assumes, denies or avoids Choice"}
+
+
+def test_foundations_warn_until_a_review_acknowledges_them_whatever_its_verdict(research_repo, monkeypatch, capsys):
+    root = research_repo
+    monkeypatch.chdir(root)
+    with_target(root)
+    entry = {**NULL, "definitions": [], "totalized": [], "foundations": [CARD, AC]}
+    set_lean(root, ["VL.AddZero.main", "VL.AddZero.witness"], ["VL.AddZero.witness"])
+    receipt(root, {"VL.AddZero.main": entry, "VL.AddZero.witness": entry})
+    commit_all(root)
+    assert status(root).label == "verified"                      # information, never a status
+    asked = [w for w in warnings(capsys) if "set-theoretic foundations in the target" in w]
+    assert len(asked) == 1 and "VL.AddZero.main: `Cardinal.mk` (cardinals are compared" in asked[0], asked
+    assert "`Fixture.AC` (names a choice principle" in asked[0] and "in definition Fixture.choiceFn" in asked[0]
+    assert "witness" not in asked[0] and "--acknowledge foundations" in asked[0]
+    out = vl(capsys, "show", "add-zero")[1]
+    assert "the axiom list is uninformative here" in out and "  foundations: `Cardinal.mk` (cardinals" in out
+    assert "in definition Fixture.choiceFn" in out
+    # A faithful review that does not acknowledge them leaves them asked; acknowledging answers, even when it finds
+    # the target too weak, because the question was read.
+    vl(capsys, "review", "add-zero", "--kind", "fidelity", *meaning_args(), "--verdict", "faithful", "--author",
+       "agent:referee", "--text", "Reads as the claim says.")
+    commit_all(root)
+    assert any("set-theoretic foundations in the target" in w for w in warnings(capsys))
+    vl(capsys, "review", "add-zero", "--kind", "fidelity", *meaning_args(), "--verdict", "too-weak", "--author",
+       "agent:referee", "--acknowledge", "foundations", "--text", "Choice holds in Lean; the claim is silent on it.")
+    commit_all(root)
+    assert not any("set-theoretic foundations" in w for w in warnings(capsys))
+    assert "probe findings acknowledged by a review of the current target: foundations" in vl(capsys, "show", "add-zero")[1]
+    assert "  foundations: `Cardinal.mk`" in vl(capsys, "show", "add-zero")[1]        # the card keeps showing them
+
+
+def test_a_target_naming_no_foundations_asks_nothing(research_repo, monkeypatch, capsys):
+    """The clean control: probes that list none (or a receipt from before they did) ask nothing, and the card
+    keeps the axiom list as it is."""
+    root = research_repo
+    monkeypatch.chdir(root)
+    with_target(root)
+    receipt(root, {"VL.AddZero.main": {**NULL, "definitions": [], "totalized": [], "foundations": []}})
+    receipt(root, {"VL.AddZero.main": NULL}, finished="t0")
+    commit_all(root)
+    assert not any("foundations" in w for w in warnings(capsys))
+    out = vl(capsys, "show", "add-zero")[1]
+    assert "  foundations:" not in out and "uninformative" not in out
+
+
+def test_foundations_of_a_witness_are_excepted_on_the_card_as_in_validate(research_repo, monkeypatch, capsys):
+    """A witness theorem is a test of the definitions, not the claim: its foundations ask nothing and the card does
+    not say the axiom list is uninformative because of it; the target's own do."""
+    root = research_repo
+    monkeypatch.chdir(root)
+    with_target(root)
+    set_lean(root, ["VL.AddZero.main", "VL.AddZero.witness"], ["VL.AddZero.witness"])
+    clean = {**NULL, "definitions": [], "totalized": [], "foundations": []}
+    named = {**clean, "foundations": [CARD]}
+    receipt(root, {"VL.AddZero.main": clean, "VL.AddZero.witness": named})
+    commit_all(root)
+    assert not any("set-theoretic foundations" in w for w in warnings(capsys))
+    assert "uninformative" not in vl(capsys, "show", "add-zero")[1]
+    receipt(root, {"VL.AddZero.main": named, "VL.AddZero.witness": clean}, finished="t2")
+    commit_all(root)
+    assert any("set-theoretic foundations" in w for w in warnings(capsys))
+    assert "uninformative" in vl(capsys, "show", "add-zero")[1]
+
+
+def test_only_a_fidelity_review_can_acknowledge_foundations(research_repo, monkeypatch, capsys):
+    root = research_repo
+    monkeypatch.chdir(root)
+    with_target(root)
+    rc, _, err = vl(capsys, "review", "add-zero", "--kind", "compare", "--acknowledge", "foundations", "--author",
+                    "agent:referee", "--text", "x")
+    assert rc != 0 and "--acknowledge only applies to --kind fidelity" in err
